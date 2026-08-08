@@ -1,0 +1,27 @@
+:root {
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  --font-content: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  --font-mono: 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
+
+  --topbar-height: 48px;
+  --statusbar-height: 27px;
+  --left-pane-width: 220px;
+  --right-pane-width: 286px;
+
+  --radius-sm: 5px;
+  --motion-fast: 120ms;
+}
+
+@media (max-width: 1050px) {
+  :root {
+    --left-pane-width: 64px;
+    --right-pane-width: 260px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+  }
+}
+

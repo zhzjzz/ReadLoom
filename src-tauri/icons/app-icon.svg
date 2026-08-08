@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Readloom">
+  <rect width="512" height="512" rx="104" fill="#20242c"/>
+  <path d="M128 122h112c68 0 116 39 116 101 0 43-24 76-61 91l75 78h-72l-66-69h-39v69h-65V122Zm65 57v89h43c35 0 55-17 55-45s-20-44-55-44h-43Z" fill="#f7f9fc"/>
+  <path d="M128 122c34 0 65 8 92 25v58c-27-17-58-26-92-26v-57Z" fill="#6f9df5"/>
+</svg>

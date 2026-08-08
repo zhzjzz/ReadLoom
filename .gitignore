@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.npm-cache/
+src-tauri/target/
+target/
+*.log
+.DS_Store
+
