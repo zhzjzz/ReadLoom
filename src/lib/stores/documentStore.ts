@@ -34,6 +34,9 @@ export function createDocumentStore() {
         error: null,
       });
     },
+    restore(active: DocumentState['active']): void {
+      set({ active, saveStatus: 'idle', error: null });
+    },
     markContentDirty(contentDirty: boolean): void {
       update((state) => ({
         ...state,

@@ -5,6 +5,7 @@
   export let document: DocumentSession | null;
   export let statistics: EditorStatistics = { lines: 0, characters: 0 };
   export let saving = false;
+  export let epubStatus: string | null = null;
 
   const lineEndingLabels = {
     crlf: 'CRLF',
@@ -21,7 +22,7 @@
 
 <footer class="editor-statusbar">
   <span class:dirty={isDirty(document)}>
-    {saving ? '正在安全保存' : isDirty(document) ? '未保存' : document ? '已保存' : '就绪'}
+    {epubStatus ?? (saving ? '正在安全保存' : isDirty(document) ? '未保存' : document ? '已保存' : '就绪')}
   </span>
   <div class="status-spacer"></div>
   {#if document}

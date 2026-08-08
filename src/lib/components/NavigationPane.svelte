@@ -1,8 +1,12 @@
 <script lang="ts">
   import Icon, { type IconName } from './Icon.svelte';
+  import type { RecentDocumentDto } from '../types/epub';
 
   export let desktopRuntime = true;
   export let onOpen: () => void;
+  export let onOpenEpub: () => void = () => {};
+  export let recentDocuments: RecentDocumentDto[] = [];
+  export let onOpenRecent: (document: RecentDocumentDto) => void = () => {};
 
   const sections: Array<{
     label: string;
@@ -30,8 +34,24 @@
     <button class="open-button" disabled={!desktopRuntime} onclick={onOpen} type="button">
       <span>打开 TXT</span>
     </button>
+    <button class="epub-open-button" disabled={!desktopRuntime} onclick={onOpenEpub} type="button">
+      <span>打开 EPUB</span>
+    </button>
   </div>
   <div class="nav-scroll">
+    {#if recentDocuments.length}
+      <section class="recent-section">
+        <h2>最近文件</h2>
+        <div class="recent-items">
+          {#each recentDocuments as document}
+            <button onclick={() => onOpenRecent(document)} title={document.path} type="button">
+              <span class="recent-kind">{document.documentKind.toUpperCase()}</span>
+              <span class="recent-copy"><strong>{document.displayTitle}</strong>{#if document.author}<small>{document.author}</small>{/if}</span>
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/if}
     {#each sections as section}
       <section>
         <h2>{section.label}</h2>
@@ -77,6 +97,8 @@
   .open-area {
     border-bottom: 1px solid var(--border-subtle);
     padding: 11px 10px;
+    display: grid;
+    gap: 6px;
   }
 
   .open-button {
@@ -88,6 +110,10 @@
   .open-button:hover:not(:disabled) {
     background: var(--accent-strong);
     color: white;
+  }
+
+  .epub-open-button {
+    justify-content: center;
   }
 
   section + section {
@@ -107,6 +133,43 @@
   .nav-items {
     display: grid;
     gap: 3px;
+  }
+
+  .recent-items {
+    display: grid;
+    gap: 3px;
+  }
+
+  .recent-items button {
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .recent-kind {
+    color: var(--text-disabled);
+    flex: 0 0 28px;
+    font: 700 8px/1 var(--font-mono);
+  }
+
+  .recent-copy {
+    display: grid;
+    min-width: 0;
+  }
+
+  .recent-copy strong,
+  .recent-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-copy strong {
+    font: 550 11px/1.3 var(--font-ui);
+  }
+
+  .recent-copy small {
+    color: var(--text-tertiary);
+    font: 400 9px/1.25 var(--font-ui);
   }
 
   button {

@@ -11,6 +11,7 @@ use crate::{
         DocumentId, LineEnding, OpenedTextDocument, SaveLineEnding, SavedTextDocument, TextEncoding,
     },
     error::AppError,
+    infrastructure::storage::local_state::{LocalStateStore, RecentDocumentRecord},
 };
 
 #[derive(Debug, Deserialize)]
@@ -94,16 +95,23 @@ pub struct SavedTextDocumentDto {
 #[tauri::command]
 pub fn open_text_document(
     state: State<'_, TextDocumentService>,
+    local_state: State<'_, LocalStateStore>,
     request: OpenTextDocumentRequest,
 ) -> Result<OpenedTextDocumentDto, AppError> {
     let path = validated_path(request.path)?;
-    state
-        .open(OpenTextDocument {
-            path,
-            encoding_override: request.encoding_override,
-            allow_large: request.allow_large,
-        })
-        .map(OpenedTextDocumentDto::from)
+    let opened = state.open(OpenTextDocument {
+        path,
+        encoding_override: request.encoding_override,
+        allow_large: request.allow_large,
+    })?;
+    let _ = local_state.record_recent(RecentDocumentRecord {
+        path: &opened.path,
+        document_kind: "txt",
+        display_title: &opened.file_name,
+        author: None,
+        fingerprint: None,
+    });
+    Ok(OpenedTextDocumentDto::from(opened))
 }
 
 #[tauri::command]

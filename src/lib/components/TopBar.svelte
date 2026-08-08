@@ -2,11 +2,19 @@
   import type { BackendConnection } from '../types/ipc';
   import type { DocumentSession } from '../types/document';
   import { isDirty } from '../types/document';
+  import type { WorkspaceTabSummary } from '../types/workspace';
   import Icon from './Icon.svelte';
 
   export let connection: BackendConnection;
   export let document: DocumentSession | null = null;
+  export let displayTitle: string | null = null;
+  export let displayPath: string | null = null;
+  export let hasDocument = false;
   export let onClose: () => void = () => {};
+  export let tabs: WorkspaceTabSummary[] = [];
+  export let activeTabId: string | null = null;
+  export let onSelectTab: (tabId: string) => void = () => {};
+  export let onCloseTab: (tabId: string) => void = () => {};
 
   $: connectionLabel =
     connection.status === 'connected'
@@ -16,6 +24,9 @@
         : connection.status === 'browser-preview'
           ? '浏览器预览'
           : '连接异常';
+  $: resolvedTitle = displayTitle ?? document?.fileName ?? '文档工作区';
+  $: resolvedPath = displayPath ?? document?.displayPath ?? '文档工作区';
+  $: documentOpen = hasDocument || Boolean(document);
 </script>
 
 <header class="topbar">
@@ -25,14 +36,30 @@
     <span class="brand-cn">阅织</span>
   </div>
 
-  <div class="tab" aria-current="page" title={document?.displayPath ?? 'TXT 工作区'}>
-    <Icon name="document" size={16} />
-    <span class="tab-title">{document?.fileName ?? 'TXT 工作区'}</span>
-    {#if isDirty(document)}<span aria-label="未保存" class="dirty-mark">●</span>{/if}
-    {#if document}
-      <button aria-label={`关闭 ${document.fileName}`} class="tab-close" onclick={onClose} title="关闭文档" type="button">×</button>
-    {/if}
-  </div>
+  {#if tabs.length}
+    <div aria-label="文档标签" class="tabs-strip">
+      {#each tabs as item}
+        <div class:active-tab={item.id === activeTabId} class="tab" title={item.path}>
+          <button class="tab-select" onclick={() => onSelectTab(item.id)} type="button">
+            <span class="tab-kind">{item.kind.toUpperCase()}</span>
+            <span class="tab-title">{item.title}</span>
+            {#if item.detail}<span class="tab-detail">{item.detail}</span>{/if}
+            {#if item.dirty}<span aria-label="未保存" class="dirty-mark">●</span>{/if}
+          </button>
+          <button aria-label={`关闭 ${item.title}`} class="tab-close" onclick={() => onCloseTab(item.id)} title="关闭文档" type="button">×</button>
+        </div>
+      {/each}
+    </div>
+  {:else}
+    <div class="active-tab tab" aria-current="page" title={resolvedPath}>
+      <Icon name="document" size={16} />
+      <span class="tab-title">{resolvedTitle}</span>
+      {#if isDirty(document)}<span aria-label="未保存" class="dirty-mark">●</span>{/if}
+      {#if documentOpen}
+        <button aria-label={`关闭 ${resolvedTitle}`} class="tab-close" onclick={onClose} title="关闭文档" type="button">×</button>
+      {/if}
+    </div>
+  {/if}
 
   <div class="topbar-spacer"></div>
 
@@ -90,10 +117,45 @@
     display: flex;
     font: 600 13px/1 var(--font-ui);
     gap: 8px;
-    max-width: min(520px, 58vw);
+    flex: 0 0 auto;
+    max-width: min(340px, 34vw);
     min-width: 0;
     padding: 0 18px;
     position: relative;
+  }
+
+  .tabs-strip {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .tab-select {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    display: flex;
+    font: inherit;
+    gap: 7px;
+    min-width: 0;
+    padding: 0;
+  }
+
+  .tab-kind {
+    color: var(--text-disabled);
+    font: 700 8px/1 var(--font-mono);
+    letter-spacing: 0.04em;
+  }
+
+  .tab-detail {
+    color: var(--text-tertiary);
+    font: 500 9px/1 var(--font-ui);
+    max-width: 84px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .tab-title {
@@ -104,6 +166,10 @@
   }
 
   .tab::after {
+    display: none;
+  }
+
+  .tab.active-tab::after {
     background: var(--accent);
     bottom: -1px;
     content: '';
@@ -111,6 +177,11 @@
     left: 0;
     position: absolute;
     right: 0;
+    display: block;
+  }
+
+  .tab:not(.active-tab) {
+    color: var(--text-secondary);
   }
 
   .dirty-mark {

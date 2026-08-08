@@ -82,7 +82,7 @@ fn decode_utf8(bytes: &[u8], has_bom: bool) -> Result<DecodedText, AppError> {
 }
 
 fn decode_utf16(bytes: &[u8], little_endian: bool, has_bom: bool) -> Result<DecodedText, AppError> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(AppError::validation(
             "DECODE_FAILED",
             "UTF-16 文件包含不完整的双字节字符。",

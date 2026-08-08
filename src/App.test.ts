@@ -7,7 +7,7 @@ import { documentStore } from './lib/stores/documentStore';
 describe('App error feedback', () => {
   it('shows actionable Rust errors without clearing the workspace', async () => {
     render(App);
-    await screen.findByText('打开一篇文字，开始编织');
+    await screen.findByText('打开一本书，开始阅读或编织');
 
     documentStore.failed({
       code: 'EXTERNAL_MODIFICATION',
@@ -20,6 +20,6 @@ describe('App error feedback', () => {
       expect(screen.getByRole('alert').textContent).toContain('Readloom 没有覆盖它');
       expect(screen.getByRole('alert').textContent).toContain('请选择另存为');
     });
-    expect(screen.getByText('打开一篇文字，开始编织')).toBeTruthy();
+    expect(screen.getByText('打开一本书，开始阅读或编织')).toBeTruthy();
   });
 });
