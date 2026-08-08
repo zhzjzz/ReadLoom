@@ -101,7 +101,7 @@ impl EpubDocumentService {
             .ok_or_else(invalid_epub_path)?;
         let document_number = self.next_document_id.fetch_add(1, Ordering::Relaxed);
         let opened = OpenedEpubDocument {
-            document_id: format!("doc-{document_number:016x}"),
+            document_id: format!("epub-{document_number:016x}"),
             session_id: random_token()?,
             bridge_token: random_token()?,
             file_name,
@@ -567,6 +567,7 @@ mod tests {
 
         let opened = service.open(fixture.path()).expect("open EPUB session");
 
+        assert!(opened.document_id.starts_with("epub-"));
         assert_eq!(opened.session_id.len(), 48);
         assert!(
             opened

@@ -174,14 +174,14 @@ fn validated_path(path: String) -> Result<PathBuf, AppError> {
         return Err(AppError::validation(
             "INVALID_PATH",
             "文件路径不能为空。",
-            "请通过文件选择器选择 TXT 文件。",
+            "请通过文件选择器选择文件。",
         ));
     }
     Ok(PathBuf::from(path))
 }
 
 fn validated_document_id(document_id: String) -> Result<DocumentId, AppError> {
-    if !document_id.starts_with("doc-") || document_id.len() != 20 {
+    if !document_id.starts_with("txt-") || document_id.len() != 20 {
         return Err(AppError::validation(
             "DOCUMENT_NOT_FOUND",
             "文档会话标识无效。",

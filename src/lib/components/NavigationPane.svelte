@@ -4,7 +4,6 @@
 
   export let desktopRuntime = true;
   export let onOpen: () => void;
-  export let onOpenEpub: () => void = () => {};
   export let recentDocuments: RecentDocumentDto[] = [];
   export let onOpenRecent: (document: RecentDocumentDto) => void = () => {};
 
@@ -32,10 +31,7 @@
 <aside aria-label="主导航" class="navigation-pane">
   <div class="open-area">
     <button class="open-button" disabled={!desktopRuntime} onclick={onOpen} type="button">
-      <span>打开 TXT</span>
-    </button>
-    <button class="epub-open-button" disabled={!desktopRuntime} onclick={onOpenEpub} type="button">
-      <span>打开 EPUB</span>
+      <span>打开文件</span>
     </button>
   </div>
   <div class="nav-scroll">
@@ -98,7 +94,6 @@
     border-bottom: 1px solid var(--border-subtle);
     padding: 11px 10px;
     display: grid;
-    gap: 6px;
   }
 
   .open-button {
@@ -110,10 +105,6 @@
   .open-button:hover:not(:disabled) {
     background: var(--accent-strong);
     color: white;
-  }
-
-  .epub-open-button {
-    justify-content: center;
   }
 
   section + section {

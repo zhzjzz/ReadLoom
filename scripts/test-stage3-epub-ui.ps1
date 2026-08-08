@@ -1,6 +1,7 @@
 param(
     [string]$ExecutablePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src-tauri\target\release\readloom.exe'),
     [string]$EpubPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\validation\readloom-stage3.epub'),
+    [string]$TextFallbackPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\validation\readloom-fallback.markdown'),
     [ValidateRange(1024, 65535)]
     [int]$DebugPort = 9237
 )
@@ -10,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
+using System.Threading;
 using System.Runtime.InteropServices;
 
 public static class ReadloomUiCloseHarness
@@ -64,7 +66,9 @@ public static class ReadloomUiCloseHarness
         if (fileName == IntPtr.Zero) fileName = GetDlgItem(dialog, 0x480);
         IntPtr openButton = GetDlgItem(dialog, 1);
         if (fileName == IntPtr.Zero || openButton == IntPtr.Zero) return false;
+        SetForegroundWindow(dialog);
         SendMessage(fileName, 0x000c, IntPtr.Zero, path);
+        Thread.Sleep(150);
         SendMessage(openButton, 0x00f5, IntPtr.Zero, IntPtr.Zero);
         return true;
     }
@@ -82,6 +86,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $artifactDirectory = Join-Path $projectRoot 'target\validation'
 New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
 $screenshotPath = Join-Path $artifactDirectory 'stage3-epub-ui.png'
+$fallbackScreenshotPath = Join-Path $artifactDirectory 'stage3-unified-open-ui.png'
+$fallbackMarker = '未知扩展名已按文本成功打开'
+[System.IO.File]::WriteAllText($TextFallbackPath, $fallbackMarker, [System.Text.UTF8Encoding]::new($false))
 
 $previousBrowserArguments = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$DebugPort"
@@ -283,14 +290,14 @@ try {
     $clicked = Invoke-JavaScript -Socket $socket -Expression @'
 (() => {
   const button = [...document.querySelectorAll('button')]
-    .find((candidate) => candidate.textContent?.trim() === '打开 EPUB');
+    .find((candidate) => candidate.textContent?.trim() === '打开文件');
   if (!button) return false;
   button.click();
   return true;
 })()
 '@
     if (-not $clicked) {
-        throw 'The release UI did not expose the Open EPUB button.'
+        throw 'The release UI did not expose the unified Open File button.'
     }
 
     $dialogDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -298,7 +305,7 @@ try {
         Start-Sleep -Milliseconds 100
         $dialogHandle = [ReadloomUiCloseHarness]::FindFileDialog([uint32]$process.Id)
         if ([DateTime]::UtcNow -gt $dialogDeadline) {
-            throw 'Timed out waiting for the native EPUB file dialog.'
+            throw 'Timed out waiting for the native file dialog.'
         }
     } while ($dialogHandle -eq [IntPtr]::Zero)
 
@@ -447,6 +454,56 @@ try {
     }
     [System.IO.File]::WriteAllBytes($screenshotPath, [Convert]::FromBase64String($screenshot.data))
 
+    $fallbackClicked = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find((candidate) => candidate.textContent?.trim() === '打开文件');
+  if (!button) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $fallbackClicked) {
+        throw 'The unified Open File button disappeared after opening an EPUB.'
+    }
+
+    $dialogDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 100
+        $dialogHandle = [ReadloomUiCloseHarness]::FindFileDialog([uint32]$process.Id)
+        if ([DateTime]::UtcNow -gt $dialogDeadline) {
+            throw 'Timed out waiting for the native file dialog for the fallback text file.'
+        }
+    } while ($dialogHandle -eq [IntPtr]::Zero)
+
+    if (-not [ReadloomUiCloseHarness]::SubmitFileDialog($dialogHandle, $TextFallbackPath)) {
+        throw 'The native file dialog did not accept the fallback text file.'
+    }
+
+    $fallbackDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 100
+        $fallbackState = Invoke-JavaScript -Socket $socket -Expression @'
+(() => ({
+  editorText: document.querySelector('.cm-content')?.textContent ?? '',
+  epubFrameCount: document.querySelectorAll('iframe[sandbox="allow-scripts"]').length,
+  tabText: document.querySelector('.document-tabs')?.textContent ?? document.body.innerText
+}))()
+'@
+        if ([DateTime]::UtcNow -gt $fallbackDeadline) {
+            throw "Timed out waiting for unknown extension text fallback. Current state: $($fallbackState | ConvertTo-Json -Compress)"
+        }
+    } while ($fallbackState.editorText -notlike "*$fallbackMarker*" -or $fallbackState.epubFrameCount -ne 0)
+
+    $fallbackScreenshot = Invoke-CdpCommand -Socket $socket -Method 'Page.captureScreenshot' -Parameters @{
+        format = 'png'
+        captureBeyondViewport = $false
+    }
+    [System.IO.File]::WriteAllBytes(
+        $fallbackScreenshotPath,
+        [Convert]::FromBase64String($fallbackScreenshot.data)
+    )
+
     $process.Refresh()
     if (-not [ReadloomUiCloseHarness]::PostMessage(
         $process.MainWindowHandle,
@@ -478,11 +535,15 @@ try {
         searchMs = [Math]::Round($searchStopwatch.Elapsed.TotalMilliseconds, 2)
         searchResults = $searchResultCount
         bookmarkRequestSent = $bookmarkAdded
+        fallbackFile = $TextFallbackPath
+        fallbackOpenedAsText = $fallbackState.editorText -like "*$fallbackMarker*"
+        fallbackKeptEpubTab = $fallbackState.tabText -like '*阅织阶段三验收书*'
         epubWorkingSetBytes = [int64]$epubWorkingSetBytes
         epubPrivateMemoryBytes = [int64]$epubPrivateMemoryBytes
         exited = $true
         exitCode = $process.ExitCode
         screenshot = $screenshotPath
+        fallbackScreenshot = $fallbackScreenshotPath
     }
 }
 finally {

@@ -17,6 +17,7 @@ vi.mock('@tauri-apps/api/window', () => ({
       closeHarness.closeRequested = handler;
       return closeHarness.unlisten;
     },
+    onDragDropEvent: async () => vi.fn(),
   }),
 }));
 

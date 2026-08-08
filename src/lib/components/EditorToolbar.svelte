@@ -50,7 +50,7 @@
 
 <nav aria-label="文本文件操作" class="editor-toolbar">
   <div class="action-group">
-    <button disabled={!desktopRuntime || saving} onclick={onOpen} title="打开 TXT（Ctrl+O）" type="button">
+    <button disabled={!desktopRuntime || saving} onclick={onOpen} title="打开文件（Ctrl+O）" type="button">
       打开
     </button>
     <button

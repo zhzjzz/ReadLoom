@@ -215,19 +215,21 @@ fn configured_size_boundaries_are_reported_before_reading_content() {
 }
 
 #[test]
-fn invalid_extension_is_rejected() {
+fn unknown_extension_is_opened_as_text() {
     let directory = test_directory();
     let path = directory.path().join("not-text.md");
     fs::write(&path, "text").expect("fixture");
     let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
 
-    let error = service
+    let opened = service
         .open(OpenTextDocument {
             path,
             encoding_override: None,
             allow_large: false,
         })
-        .expect_err("only TXT is accepted in stage 1");
+        .expect("unknown extensions should use the text reader");
 
-    assert_eq!(error.to_dto().code, "INVALID_PATH");
+    assert!(opened.document_id.0.starts_with("txt-"));
+    assert_eq!(opened.content, "text");
+    assert_eq!(opened.file_name, "not-text.md");
 }

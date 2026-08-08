@@ -78,7 +78,6 @@ impl TextDocumentService {
     }
 
     pub fn open(&self, request: OpenTextDocument) -> Result<OpenedTextDocument, AppError> {
-        validate_txt_path(&request.path)?;
         let canonical_path =
             fs::canonicalize(&request.path).map_err(|error| map_open_error(&error))?;
         reconcile_interrupted_save(&canonical_path)?;
@@ -88,7 +87,7 @@ impl TextDocumentService {
             return Err(AppError::validation(
                 "INVALID_PATH",
                 "所选路径不是普通文件。",
-                "请选择一个 .txt 文件。",
+                "请选择一个普通文件。",
             ));
         }
         self.validate_file_size(metadata_before.len(), request.allow_large)?;
@@ -112,7 +111,7 @@ impl TextDocumentService {
         let line_endings = analyze_and_normalize(&decoded.content);
         let file_name = file_name(&canonical_path)?;
         let document_number = self.next_document_id.fetch_add(1, Ordering::Relaxed);
-        let document_id = DocumentId(format!("doc-{document_number:016x}"));
+        let document_id = DocumentId(format!("txt-{document_number:016x}"));
         let fingerprint = fingerprint_from_bytes(&bytes, &metadata_after);
         let read_only = metadata_after.permissions().readonly();
         let session = TextDocumentSession {
@@ -194,7 +193,7 @@ impl TextDocumentService {
     }
 
     pub fn save_as(&self, request: SaveTextDocumentAs) -> Result<SavedTextDocument, AppError> {
-        validate_txt_path(&request.target_path)?;
+        validate_txt_save_path(&request.target_path)?;
         let target_path = normalize_save_target(&request.target_path)?;
         let mut sessions = self
             .sessions
@@ -382,7 +381,7 @@ fn normalize_save_target(path: &Path) -> Result<PathBuf, AppError> {
     Ok(canonical_parent.join(target_name))
 }
 
-pub(crate) fn validate_txt_path(path: &Path) -> Result<(), AppError> {
+fn validate_txt_save_path(path: &Path) -> Result<(), AppError> {
     let is_txt = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -390,8 +389,8 @@ pub(crate) fn validate_txt_path(path: &Path) -> Result<(), AppError> {
     if !is_txt {
         return Err(AppError::validation(
             "INVALID_PATH",
-            "阶段 1 只能处理 .txt 文件。",
-            "请选择扩展名为 .txt 的文件。",
+            "文本另存为目标必须使用 .txt 扩展名。",
+            "请输入扩展名为 .txt 的文件名。",
         ));
     }
     Ok(())

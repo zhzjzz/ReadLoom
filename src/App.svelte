@@ -17,20 +17,22 @@
   } from './lib/services/backend';
   import { createShortcutHandler } from './lib/services/shortcuts';
   import {
-    chooseEpubFile,
     closeEpubDocument,
     listRecentDocuments,
     openEpubDocument,
   } from './lib/services/epubDocumentService';
   import {
     chooseSavePath,
-    chooseTextFile,
     closeTextDocument,
     openTextDocument,
     reopenTextDocument,
     saveTextDocument,
     saveTextDocumentAs,
   } from './lib/services/textDocumentService';
+  import {
+    chooseDocumentFile,
+    classifyDocumentPath,
+  } from './lib/services/workspaceFileService';
   import { documentStore } from './lib/stores/documentStore';
   import {
     initializeTheme,
@@ -50,7 +52,7 @@
   import type { AppErrorDto, BackendConnection } from './lib/types/ipc';
   import type { WorkspaceTab, WorkspaceTabSummary } from './lib/types/workspace';
 
-  type PendingAction = 'close' | 'exit-edit' | 'open' | 'open-epub' | 'exit' | 'reopen';
+  type PendingAction = 'close' | 'exit-edit' | 'open' | 'exit' | 'reopen';
 
   const desktopRuntime = hasTauriRuntime();
   let connection: BackendConnection = { status: 'checking' };
@@ -69,6 +71,7 @@
   let activeTabId: string | null = null;
   let editorInstanceKey = 0;
   let recentDocuments: RecentDocumentDto[] = [];
+  let dragActive = false;
 
   $: activeDocument = $documentStore.active;
   $: saving = $documentStore.saveStatus === 'saving';
@@ -90,9 +93,11 @@
     window.addEventListener('keydown', shortcutHandler, { capture: true });
 
     let unlistenClose: (() => void) | null = null;
+    let unlistenDragDrop: (() => void) | null = null;
     let disposed = false;
     if (desktopRuntime) {
-      void getCurrentWindow()
+      const currentWindow = getCurrentWindow();
+      void currentWindow
         .onCloseRequested((event) => {
           const dirtyDocumentId = firstDirtyTabId();
           if (dirtyDocumentId || saving) {
@@ -108,12 +113,29 @@
           if (disposed) unlisten();
           else unlistenClose = unlisten;
         });
+      void currentWindow
+        .onDragDropEvent((event) => {
+          if (event.payload.type === 'enter' || event.payload.type === 'over') {
+            dragActive = true;
+            return;
+          }
+          dragActive = false;
+          if (event.payload.type === 'drop') void openDroppedPaths(event.payload.paths);
+        })
+        .then((unlisten) => {
+          if (disposed) unlisten();
+          else unlistenDragDrop = unlisten;
+        })
+        .catch((error) => {
+          documentStore.failed(normalizeAppError(error));
+        });
     }
 
     return () => {
       disposed = true;
       disposeTheme();
       unlistenClose?.();
+      unlistenDragDrop?.();
       window.removeEventListener('keydown', shortcutHandler, { capture: true });
     };
   });
@@ -144,8 +166,7 @@
   }
 
   function openRecent(document: RecentDocumentDto): void {
-    if (document.documentKind === 'epub') void openEpubPath(document.path);
-    else void openPath(document.path, null, false);
+    void openDocumentPath(document.path);
   }
 
   function summarizeTabs(
@@ -271,21 +292,6 @@
     );
   }
 
-  function requestOpenEpub(): void {
-    if (!desktopRuntime || saving) return;
-    void performOpenEpub();
-  }
-
-  async function performOpenEpub(): Promise<void> {
-    try {
-      const path = await chooseEpubFile();
-      if (!path) return;
-      await openEpubPath(path);
-    } catch (error) {
-      epubError = normalizeAppError(error);
-    }
-  }
-
   async function openEpubPath(path: string): Promise<void> {
     try {
       const opened = await openEpubDocument(path);
@@ -329,12 +335,22 @@
 
   async function performOpen(): Promise<void> {
     try {
-      const path = await chooseTextFile();
+      const path = await chooseDocumentFile();
       if (!path) return;
-      await openPath(path, null, false);
+      await openDocumentPath(path);
     } catch (error) {
       documentStore.failed(normalizeAppError(error));
     }
+  }
+
+  async function openDocumentPath(path: string): Promise<void> {
+    if (classifyDocumentPath(path) === 'epub') await openEpubPath(path);
+    else await openPath(path, null, false);
+  }
+
+  async function openDroppedPaths(paths: string[]): Promise<void> {
+    if (saving) return;
+    for (const path of paths) await openDocumentPath(path);
   }
 
   async function openPath(
@@ -588,14 +604,12 @@
     }
     await closeCurrentDocument();
     if (action === 'open') await performOpen();
-    else if (action === 'open-epub') await performOpenEpub();
   }
 
   async function continueAction(action: PendingAction): Promise<void> {
     if (action === 'exit-edit') finishEditing();
     else if (action === 'close') await closeCurrentDocument();
     else if (action === 'open') await performOpen();
-    else if (action === 'open-epub') await performOpenEpub();
     else if (action === 'reopen') await performReopen();
     else await continueExit();
   }
@@ -639,7 +653,6 @@
       {desktopRuntime}
       {recentDocuments}
       onOpen={requestOpen}
-      onOpenEpub={requestOpenEpub}
       onOpenRecent={openRecent}
     />
 
@@ -704,14 +717,13 @@
           <section class="empty-state">
             <div class="empty-mark">R</div>
             <h1>打开一本书，开始阅读或编织</h1>
-            <p>TXT 支持安全编辑与保存；EPUB 2/3 以隔离、只读模式打开。</p>
+            <p>EPUB 2/3 以隔离模式阅读；其他文件按文本打开并支持安全编辑。</p>
             <div class="empty-actions">
               <button disabled={!desktopRuntime} onclick={requestOpen} type="button">
-                {desktopRuntime ? '选择 TXT 文件' : '请在 Readloom 桌面版中打开'}
+                {desktopRuntime ? '选择文件' : '请在 Readloom 桌面版中打开'}
               </button>
-              <button disabled={!desktopRuntime} onclick={requestOpenEpub} type="button">选择 EPUB 文件</button>
             </div>
-            <span>Ctrl+O 打开 · Ctrl+S 保存 · Ctrl+Shift+S 另存为</span>
+            <span>拖入文件，或按 Ctrl+O 打开 · Ctrl+S 保存 · Ctrl+Shift+S 另存为</span>
           </section>
         {/if}
       </div>
@@ -731,6 +743,14 @@
     {saving}
     {statistics}
   />
+  {#if dragActive}
+    <div class="drop-overlay" role="status">
+      <div>
+        <strong>松开以打开文件</strong>
+        <span>EPUB 作为电子书打开，其他格式作为文本打开</span>
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#if pendingAction && activeDocument}
@@ -751,6 +771,7 @@
     height: 100%;
     min-height: 0;
     min-width: 0;
+    position: relative;
   }
 
   .workspace-grid {
@@ -831,12 +852,6 @@
     margin-top: 23px;
   }
 
-  .empty-actions button + button {
-    background: var(--surface-control);
-    border-color: var(--border-strong);
-    color: var(--text-primary);
-  }
-
   .empty-state button:disabled {
     background: var(--surface-control);
     border-color: var(--border-strong);
@@ -894,6 +909,38 @@
     border: 0;
     font-size: 18px;
     width: 28px;
+  }
+
+  .drop-overlay {
+    align-items: center;
+    background: color-mix(in srgb, var(--surface-canvas) 88%, transparent);
+    border: 2px dashed var(--accent);
+    display: flex;
+    inset: 10px;
+    justify-content: center;
+    position: absolute;
+    z-index: 100;
+  }
+
+  .drop-overlay > div {
+    background: var(--surface-pane);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 16px 40px rgb(0 0 0 / 18%);
+    display: grid;
+    gap: 8px;
+    padding: 24px 32px;
+    text-align: center;
+  }
+
+  .drop-overlay strong {
+    color: var(--text-primary);
+    font: 650 16px/1.2 var(--font-ui);
+  }
+
+  .drop-overlay span {
+    color: var(--text-tertiary);
+    font: 500 11px/1.4 var(--font-ui);
   }
 
   @media (max-width: 980px) {

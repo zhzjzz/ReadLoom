@@ -40,7 +40,7 @@
     {:else}
       <div class="runtime-note">
         <Icon name="document" size={16} />
-        <p>打开 TXT 后，这里会显示 Rust 检测到的编码、BOM 和换行格式。</p>
+        <p>打开文本文件后，这里会显示 Rust 检测到的编码、BOM 和换行格式。</p>
       </div>
     {/if}
   </section>

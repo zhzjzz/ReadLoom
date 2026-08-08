@@ -1,5 +1,4 @@
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 
 import type {
   EpubBookmark,
@@ -10,16 +9,6 @@ import type {
   RecentDocumentDto,
 } from '../types/epub';
 import { normalizeAppError } from './backend';
-
-export async function chooseEpubFile(): Promise<string | null> {
-  const selected = await open({
-    directory: false,
-    multiple: false,
-    title: '打开 EPUB 电子书',
-    filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }],
-  });
-  return typeof selected === 'string' ? selected : null;
-}
 
 export async function openEpubDocument(path: string): Promise<OpenedEpubDocumentDto> {
   try {

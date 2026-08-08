@@ -38,16 +38,16 @@ npm run tauri -- build --no-bundle
 ```
 
 - `svelte-check`：0 error、0 warning。
-- Vitest：16 files、35 tests 全部通过。
+- Vitest：17 files、38 tests 全部通过。
 - Rust：55 tests 全部通过。
 - Clippy：`-D warnings` 通过。
-- Vite：164 modules；EPUB reader 维持独立动态块。
+- Vite：165 modules；EPUB reader 维持独立动态块。
 - Tauri：release 构建成功，产物 `src-tauri/target/release/readloom.exe`。
 - MSVC 链接器只输出中文“正在创建库”信息，被 rustc 记录为 `linker_messages` warning；没有源码或 Clippy warning。
 
 测试覆盖 EPUB 2 NCX、EPUB 3 nav、元数据、封面、spine、fixed-layout 标记、缺失 container、非 2/3 版本、路径规范化、Zip Slip、entry/单项/总量/压缩率、Unicode 冲突、加密/DRM、脚本/事件/远程资源、CSS/SVG、MIME、session 创建/失效、进度指纹、书签、搜索、SQLite migration，以及阶段 1 TXT 保存回归。
 
-前端覆盖目录展开、上一/下一章、opaque iframe、fixed-layout 提示、消息 source/session/token、双重编码路径、Windows 映射协议 URL、外部链接复制/取消、EPUB/TXT 多标签和 CodeMirror/EPUB reader 互斥延迟加载、窗口关闭 capability。
+前端覆盖目录展开、上一/下一章、opaque iframe、fixed-layout 提示、消息 source/session/token、双重编码路径、Windows 映射协议 URL、外部链接复制/取消、EPUB/TXT 多标签和 CodeMirror/EPUB reader 互斥延迟加载、统一文件入口、拖拽多文件、未知扩展名文本回退和窗口关闭 capability。
 
 ## 最终 release UI 验收
 
@@ -67,6 +67,7 @@ powershell -ExecutionPolicy Bypass -File scripts/test-release-close.ps1
 - 出版者脚本未执行，外部图片源为 0，外部网络资源请求为 0，外部链接为 1 个 inert 标记。
 - 两章搜索返回 2 个结果；书签保存请求成功。
 - iframe sandbox 精确为 `allow-scripts`，章节位于独立 OOPIF。
+- 同一“打开文件”入口随后打开 `.markdown` 文件，实际进入 CodeMirror 文本标签并保留 EPUB 标签；TXT/EPUB 使用带类型前缀的无碰撞会话 ID。
 - 加载 EPUB 后发送 `WM_CLOSE`，进程 5 秒内以 code 0 退出。
 
 性能数据见 `docs/performance/stage-3-baseline.md`。

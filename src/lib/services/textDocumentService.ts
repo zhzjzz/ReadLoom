@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { save } from '@tauri-apps/plugin-dialog';
 
 import type {
   OpenedTextDocumentDto,
@@ -8,16 +8,6 @@ import type {
   TextEncoding,
 } from '../types/document';
 import { normalizeAppError } from './backend';
-
-export async function chooseTextFile(): Promise<string | null> {
-  const selected = await open({
-    directory: false,
-    multiple: false,
-    title: '打开 TXT 文档',
-    filters: [{ name: '文本文件', extensions: ['txt'] }],
-  });
-  return typeof selected === 'string' ? selected : null;
-}
 
 export async function chooseSavePath(defaultPath: string): Promise<string | null> {
   return await save({
