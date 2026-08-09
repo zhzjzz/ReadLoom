@@ -13,10 +13,14 @@ if (Test-Path -LiteralPath $OutputPath) {
     Remove-Item -LiteralPath $OutputPath -Force
 }
 
-$stream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::CreateNew)
+$storedMimetypeArchive = [Convert]::FromBase64String(
+    'UEsDBBQAAAAAAAAACF1vYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAQIUABQAAAAAAAAACF1vYassFAAAABQAAAAIAAAAAAAAAAAAAACAAQAAAABtaW1ldHlwZVBLBQYAAAAAAQABADYAAAA6AAAAAAA='
+)
+[System.IO.File]::WriteAllBytes($OutputPath, $storedMimetypeArchive)
+$stream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Open)
 $archive = [System.IO.Compression.ZipArchive]::new(
     $stream,
-    [System.IO.Compression.ZipArchiveMode]::Create,
+    [System.IO.Compression.ZipArchiveMode]::Update,
     $false
 )
 
@@ -58,7 +62,6 @@ function Add-BinaryEntry {
 }
 
 try {
-    Add-TextEntry -Name 'mimetype' -Content 'application/epub+zip' -Compression ([System.IO.Compression.CompressionLevel]::NoCompression)
     Add-TextEntry -Name 'META-INF/container.xml' -Content @'
 <?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">

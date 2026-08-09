@@ -5,7 +5,11 @@ use cssparser::{ParseError, Parser, ParserInput, Token};
 use percent_encoding::{
     AsciiSet, CONTROLS, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode,
 };
-use quick_xml::{Reader, XmlVersion, events::Event};
+use quick_xml::{
+    Reader, XmlVersion,
+    escape::resolve_predefined_entity,
+    events::{BytesRef, Event},
+};
 
 use crate::{error::AppError, infrastructure::archive::safe_zip::SafeArchivePath};
 
@@ -66,44 +70,78 @@ pub(crate) fn sanitize_xhtml_fragment(
 }
 
 pub(crate) fn extract_visible_text(source: &str) -> Result<String, AppError> {
-    let mut builder = Builder::default();
-    builder.add_clean_content_tags(&[
-        "script", "style", "iframe", "frame", "object", "embed", "applet", "template",
-    ]);
-    let cleaned = builder.clean(source).to_string();
-    let mut reader = Reader::from_str(&cleaned);
+    let mut reader = Reader::from_str(source);
+    reader.config_mut().check_end_names = true;
     let mut text = String::new();
+    let mut hidden_depth = 0_usize;
     loop {
         match reader.read_event() {
-            Ok(Event::Text(value)) => {
+            Ok(Event::Start(element)) => {
+                if hidden_depth > 0 || is_search_hidden_element(element.name().as_ref()) {
+                    hidden_depth = hidden_depth.saturating_add(1);
+                } else {
+                    text.push(' ');
+                }
+            }
+            Ok(Event::End(_)) if hidden_depth > 0 => {
+                hidden_depth -= 1;
+                if hidden_depth == 0 {
+                    text.push(' ');
+                }
+            }
+            Ok(Event::End(_)) => text.push(' '),
+            Ok(Event::Empty(element)) if hidden_depth == 0 => {
+                if !is_search_hidden_element(element.name().as_ref()) {
+                    text.push(' ');
+                }
+            }
+            Ok(Event::Text(value)) if hidden_depth == 0 => {
                 let decoded = value
                     .xml_content(XmlVersion::Implicit1_0)
                     .map_err(|_| unsafe_xhtml())?;
                 let unescaped =
                     quick_xml::escape::unescape(&decoded).map_err(|_| unsafe_xhtml())?;
-                append_text(&mut text, &unescaped);
+                text.push_str(&unescaped);
             }
-            Ok(Event::CData(value)) => {
+            Ok(Event::CData(value)) if hidden_depth == 0 => {
                 let decoded = value.decode().map_err(|_| unsafe_xhtml())?;
-                append_text(&mut text, &decoded);
+                text.push_str(&decoded);
+            }
+            Ok(Event::GeneralRef(reference)) if hidden_depth == 0 => {
+                append_search_reference(&mut text, &reference)?;
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(_) => return Err(unsafe_xhtml()),
         }
     }
-    Ok(text)
+    Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-fn append_text(target: &mut String, value: &str) {
-    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if value.is_empty() {
-        return;
+fn append_search_reference(target: &mut String, reference: &BytesRef<'_>) -> Result<(), AppError> {
+    if let Some(character) = reference.resolve_char_ref().map_err(|_| unsafe_xhtml())? {
+        target.push(character);
+        return Ok(());
     }
-    if !target.is_empty() {
-        target.push(' ');
-    }
-    target.push_str(&value);
+    let name = reference.decode().map_err(|_| unsafe_xhtml())?;
+    let replacement = resolve_predefined_entity(&name).ok_or_else(unsafe_xhtml)?;
+    target.push_str(replacement);
+    Ok(())
+}
+
+fn is_search_hidden_element(name: &[u8]) -> bool {
+    let local_name = name.rsplit(|byte| *byte == b':').next().unwrap_or_default();
+    matches!(
+        local_name,
+        b"script"
+            | b"style"
+            | b"iframe"
+            | b"frame"
+            | b"object"
+            | b"embed"
+            | b"applet"
+            | b"template"
+    )
 }
 
 fn unsafe_xhtml() -> AppError {
@@ -417,5 +455,25 @@ mod tests {
 
         assert_eq!(text, "第一章 可见 正文");
         assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn visible_text_extraction_decodes_numeric_xml_entities_once() {
+        let text = extract_visible_text(
+            r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Untitled</title></head><body><p>&#x4E3A;&#x7F8E;&#x597D;&#x7684;&#x4E16;&#x754C;</p></body></html>"#,
+        )
+        .expect("extract entity-encoded visible text");
+
+        assert_eq!(text, "Untitled 为美好的世界");
+    }
+
+    #[test]
+    fn visible_text_extraction_accepts_xhtml_void_elements_without_html_reserialization() {
+        let text = extract_visible_text(
+            r#"<html><body><p>图片前<img src="cover.jpg" alt="" />图片后</p></body></html>"#,
+        )
+        .expect("extract visible text around an image");
+
+        assert_eq!(text, "图片前 图片后");
     }
 }

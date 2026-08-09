@@ -37,6 +37,7 @@ const document: OpenedEpubDocumentDto = {
     metadata: {
       title: '阅织测试书',
       creators: ['测试作者'],
+      contributors: [],
       languages: ['zh-CN'],
       publisher: null,
       description: null,
@@ -46,6 +47,7 @@ const document: OpenedEpubDocumentDto = {
       rights: [],
       subjects: [],
     },
+    packageResourceId: 'EPUB/package.opf',
     coverResourceId: null,
     manifest: [
       { id: 'one', resourceId: 'EPUB/one.xhtml', mediaType: 'application/xhtml+xml', properties: [] },
@@ -76,6 +78,9 @@ const document: OpenedEpubDocumentDto = {
       hasBookmarks: true,
       canSave: false,
       canSaveAs: false,
+      canReplaceCover: false,
+      canEditStructure: false,
+      canOverwriteOriginal: false,
     },
   },
 };
@@ -111,6 +116,25 @@ describe('EpubReader', () => {
     expect(iframe?.getAttribute('referrerpolicy')).toBe('no-referrer');
   });
 
+  it('resizes the EPUB table of contents with pointer and keyboard controls', async () => {
+    render(EpubReader, {
+      document,
+      spineIndex: 0,
+      onSpineChange: vi.fn(),
+    });
+
+    const separator = screen.getByRole('separator', { name: '调整 EPUB 目录宽度' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('220');
+
+    await fireEvent.pointerDown(separator, { button: 0, clientX: 220 });
+    await fireEvent.pointerMove(window, { clientX: 300 });
+    await fireEvent.pointerUp(window);
+    expect(separator.getAttribute('aria-valuenow')).toBe('300');
+
+    await fireEvent.keyDown(separator, { key: 'ArrowRight' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('312');
+  });
+
   it('shows an explicit compatibility warning for fixed-layout publications', () => {
     render(EpubReader, {
       document: { ...document, document: { ...document.document, layout: 'fixed' } },
@@ -119,6 +143,18 @@ describe('EpubReader', () => {
     });
 
     expect(screen.getByText(/固定布局 EPUB/)).toBeTruthy();
+  });
+
+  it('marks modified chapters in both the heading and table of contents', () => {
+    render(EpubReader, {
+      document,
+      spineIndex: 1,
+      modifiedSpineIndices: [1],
+      onSpineChange: vi.fn(),
+    });
+
+    expect(screen.getByText('第二章 · 已修改')).toBeTruthy();
+    expect(screen.getByLabelText('已修改')).toBeTruthy();
   });
 
   it('reports external links in the host and only offers copy or cancel', async () => {

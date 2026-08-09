@@ -66,6 +66,44 @@ pub fn atomic_save(
         ));
     }
 
+    commit_prepared_output(target, &temporary_path, expected)
+}
+
+pub(crate) fn create_prepared_output(target: &Path) -> Result<(File, PathBuf), AppError> {
+    validate_target_parent(target)?;
+    reconcile_interrupted_save(target)?;
+    create_unique_artifact(target, "epub", true)
+}
+
+pub(crate) fn commit_prepared_output(
+    target: &Path,
+    temporary_path: &Path,
+    expected: Option<&FileFingerprint>,
+) -> Result<FileFingerprint, AppError> {
+    validate_target_parent(target)?;
+    reconcile_interrupted_save(target)?;
+    if !temporary_path.exists() || !is_safe_artifact(target, temporary_path) {
+        return Err(AppError::validation(
+            "TEMPORARY_OUTPUT_FAILED",
+            "EPUB 临时输出文件无效。",
+            "请重新选择保存位置后重试。",
+        ));
+    }
+    let existed = target.exists();
+    if existed
+        && fs::metadata(target)
+            .map_err(map_target_error)?
+            .permissions()
+            .readonly()
+    {
+        remove_if_present(temporary_path);
+        return Err(AppError::validation(
+            "PERMISSION_DENIED",
+            "目标文件是只读文件。",
+            "取消只读属性，或选择其他文件名。",
+        ));
+    }
+
     let current = if existed {
         Some(fingerprint_file(target).map_err(map_fingerprint_error)?)
     } else {
@@ -73,15 +111,15 @@ pub fn atomic_save(
     };
     match (expected, current.as_ref()) {
         (Some(expected), Some(current)) if expected != current => {
-            remove_if_present(&temporary_path);
+            remove_if_present(temporary_path);
             return Err(external_modification_error());
         }
         (Some(_), None) => {
-            remove_if_present(&temporary_path);
+            remove_if_present(temporary_path);
             return Err(external_modification_error());
         }
         (None, Some(_)) => {
-            remove_if_present(&temporary_path);
+            remove_if_present(temporary_path);
             return Err(AppError::validation(
                 "DESTINATION_EXISTS",
                 "另存为目标在确认后发生了变化。",
@@ -96,18 +134,26 @@ pub fn atomic_save(
     } else {
         None
     };
+    let new_hash = file_hash(temporary_path).ok_or_else(|| {
+        remove_if_present(temporary_path);
+        AppError::validation(
+            "TEMPORARY_OUTPUT_FAILED",
+            "无法校验 EPUB 临时输出文件。",
+            "检查磁盘状态后重试。",
+        )
+    })?;
     let journal = SaveJournal {
         target: target.to_owned(),
-        temporary: temporary_path.clone(),
+        temporary: temporary_path.to_owned(),
         backup: backup_path.clone(),
         old_hash: current
             .as_ref()
             .map(|fingerprint| fingerprint.blake3.clone()),
-        new_hash: blake3::hash(bytes).to_hex().to_string(),
+        new_hash,
     };
     let journal_path = journal_path(target)?;
     if let Err(error) = write_journal(&journal_path, &journal) {
-        remove_if_present(&temporary_path);
+        remove_if_present(temporary_path);
         return Err(AppError::validation(
             "BACKUP_FAILED",
             format!("无法创建保存恢复记录：{error}"),
@@ -116,9 +162,9 @@ pub fn atomic_save(
     }
 
     let replace_result = if existed {
-        replace_existing(target, &temporary_path, backup_path.as_deref())
+        replace_existing(target, temporary_path, backup_path.as_deref())
     } else {
-        move_new_file(&temporary_path, target)
+        move_new_file(temporary_path, target)
     };
     if let Err(error) = replace_result {
         if file_hash(target).as_deref() == Some(journal.new_hash.as_str()) {

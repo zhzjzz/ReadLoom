@@ -53,6 +53,11 @@ pub(crate) fn parse_epub_document(
             .map(|value| value.value().trim().to_owned())
             .filter(|value| !value.is_empty())
             .collect(),
+        contributors: metadata_view
+            .contributors()
+            .map(|value| value.value().trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .collect(),
         languages: metadata_view
             .languages()
             .map(|value| value.value().trim().to_owned())
@@ -165,9 +170,11 @@ pub(crate) fn parse_epub_document(
     let package_source = String::from_utf8(package_bytes).map_err(|_| invalid_epub())?;
     let layout = detect_layout(&package_source, &spine);
 
+    let editable = layout == EpubLayout::Reflowable;
     Ok(ParsedEpubDocument {
         kind: DocumentKind::Epub,
         publication_id,
+        package_resource_id: package_resource,
         version: version.to_owned(),
         metadata,
         cover_resource_id,
@@ -175,7 +182,7 @@ pub(crate) fn parse_epub_document(
         spine,
         toc,
         layout,
-        capabilities: DocumentCapabilities::epub(),
+        capabilities: DocumentCapabilities::epub(editable),
     })
 }
 
@@ -276,7 +283,12 @@ mod tests {
         assert_eq!(parsed.spine[0].resource_id, "EPUB/chapter.xhtml");
         assert!(parsed.spine[0].linear);
         assert!(parsed.capabilities.can_read);
-        assert!(!parsed.capabilities.can_edit_text);
+        assert!(parsed.capabilities.can_edit_text);
+        assert!(parsed.capabilities.can_edit_metadata);
+        assert!(parsed.capabilities.can_replace_cover);
+        assert!(parsed.capabilities.can_save_as);
+        assert!(!parsed.capabilities.can_edit_structure);
+        assert!(!parsed.capabilities.can_overwrite_original);
     }
 
     #[test]
@@ -308,6 +320,9 @@ mod tests {
             EpubLayout::Fixed,
         );
         assert_eq!(detect_layout("<package/>", &[]), EpubLayout::Reflowable);
+        assert!(!DocumentCapabilities::epub(false).can_edit_metadata);
+        assert!(!DocumentCapabilities::epub(false).can_replace_cover);
+        assert!(!DocumentCapabilities::epub(false).can_save_as);
     }
 
     #[test]

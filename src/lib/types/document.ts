@@ -16,9 +16,20 @@ export interface OpenedTextDocumentDto {
   sizeBytes: number;
   readOnly: boolean;
   revision: number;
+  bookmarks: TextBookmark[];
 }
 
-export interface SavedTextDocumentDto extends Omit<OpenedTextDocumentDto, 'content'> {}
+export interface TextBookmark {
+  bookmarkId: string;
+  characterOffset: number;
+  lineNumber: number;
+  title: string | null;
+  preview: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SavedTextDocumentDto extends Omit<OpenedTextDocumentDto, 'content' | 'bookmarks'> {}
 
 export interface DocumentSession {
   documentId: string;
@@ -53,7 +64,9 @@ export interface TextEditorHandle {
   discardChanges(): void;
   focus(): void;
   getContent(): string;
+  getCursorOffset(): number;
   markSaved(): void;
+  revealOffset(offset: number): void;
   setEditing(editing: boolean): void;
 }
 

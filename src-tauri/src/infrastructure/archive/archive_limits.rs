@@ -12,8 +12,8 @@ pub(crate) struct ArchiveLimits {
     pub maximum_xml_bytes: u64,
 }
 
-impl ArchiveLimits {
-    pub(crate) const fn stage3_default() -> Self {
+impl Default for ArchiveLimits {
+    fn default() -> Self {
         Self {
             maximum_archive_bytes: 512 * 1024 * 1024,
             maximum_entries: 10_000,
@@ -26,11 +26,5 @@ impl ArchiveLimits {
             maximum_font_bytes: 16 * 1024 * 1024,
             maximum_xml_bytes: 4 * 1024 * 1024,
         }
-    }
-}
-
-impl Default for ArchiveLimits {
-    fn default() -> Self {
-        Self::stage3_default()
     }
 }

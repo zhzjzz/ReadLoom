@@ -2,17 +2,28 @@
   import { onMount } from 'svelte';
 
   import type { EditorStatistics, TextEditorHandle } from '../types/document';
+  import type { TextHeading } from './textHeadings';
+  import { DEFAULT_TEXT_HEADING_PATTERN, findTextHeadings } from './textHeadings';
   import { loadTextEditorModules } from './textEditorModules';
 
   export let initialContent: string;
+  export let headingPattern = DEFAULT_TEXT_HEADING_PATTERN;
   export let onReady: (handle: TextEditorHandle) => void = () => {};
   export let onDirtyChange: (dirty: boolean) => void = () => {};
+  export let onHeadingsChange: (headings: TextHeading[]) => void = () => {};
   export let onStatisticsChange: (statistics: EditorStatistics) => void = () => {};
 
   let container: HTMLDivElement;
   let view: import('@codemirror/view').EditorView | null = null;
   let loading = true;
   let loadError = false;
+  let headingTimer: ReturnType<typeof setTimeout> | null = null;
+  let appliedHeadingPattern = headingPattern;
+
+  $: if (view && headingPattern !== appliedHeadingPattern) {
+    appliedHeadingPattern = headingPattern;
+    onHeadingsChange(findTextHeadings(view.state.doc.toString(), headingPattern));
+  }
 
   onMount(() => {
     let cancelled = false;
@@ -44,7 +55,7 @@
           caretColor: 'var(--accent)',
           fontFamily: 'var(--font-content)',
           lineHeight: '1.72',
-          padding: '30px clamp(28px, 6vw, 88px) 96px',
+          padding: '32px clamp(28px, 6vw, 88px)',
         },
         '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)' },
         '&.cm-focused': { outline: 'none' },
@@ -104,6 +115,11 @@
               lines: update.state.doc.lines,
               characters: update.state.doc.length,
             });
+            if (headingTimer) clearTimeout(headingTimer);
+            headingTimer = setTimeout(() => {
+              onHeadingsChange(findTextHeadings(update.state.doc.toString(), headingPattern));
+              headingTimer = null;
+            }, 180);
           }),
         ],
       });
@@ -111,6 +127,7 @@
       view = new viewModule.EditorView({ state: editorState, parent: container });
       loading = false;
       onStatisticsChange({ lines: editorState.doc.lines, characters: editorState.doc.length });
+      onHeadingsChange(findTextHeadings(editorState.doc.toString(), headingPattern));
       onReady({
         discardChanges: () => {
           if (!view) return;
@@ -123,10 +140,20 @@
         },
         focus: () => view?.focus(),
         getContent: () => view?.state.doc.toString() ?? '',
+        getCursorOffset: () => view?.state.selection.main.head ?? 0,
         markSaved: () => {
           if (!view) return;
           savedDocument = view.state.doc;
           onDirtyChange(false);
+        },
+        revealOffset: (offset) => {
+          if (!view) return;
+          const position = Math.max(0, Math.min(offset, view.state.doc.length));
+          view.dispatch({
+            selection: { anchor: position },
+            effects: viewModule.EditorView.scrollIntoView(position, { y: 'center' }),
+          });
+          view.focus();
         },
         setEditing: (editing) => {
           if (!view) return;
@@ -138,6 +165,7 @@
 
     return () => {
       cancelled = true;
+      if (headingTimer) clearTimeout(headingTimer);
       view?.destroy();
       view = null;
     };

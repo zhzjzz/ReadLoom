@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { OpenedTextDocumentDto } from './lib/types/document';
-import type { OpenedEpubDocumentDto } from './lib/types/epub';
+import type { ChapterEditDto, EpubEditDraft, OpenedEpubDocumentDto } from './lib/types/epub';
 
 const fixtures = vi.hoisted(() => ({
   closeHandler: null as ((event: { preventDefault(): void }) => void) | null,
@@ -49,6 +49,7 @@ const openedEpub: OpenedEpubDocumentDto = {
     metadata: {
       title: '测试 EPUB',
       creators: ['作者'],
+      contributors: [],
       languages: ['zh-CN'],
       publisher: null,
       description: null,
@@ -58,6 +59,7 @@ const openedEpub: OpenedEpubDocumentDto = {
       rights: [],
       subjects: [],
     },
+    packageResourceId: 'EPUB/package.opf',
     coverResourceId: null,
     manifest: [
       { id: 'chapter', resourceId: 'EPUB/chapter.xhtml', mediaType: 'application/xhtml+xml', properties: [] },
@@ -71,14 +73,84 @@ const openedEpub: OpenedEpubDocumentDto = {
     layout: 'reflowable',
     capabilities: {
       canRead: true,
-      canEditText: false,
-      canEditMetadata: false,
+      canEditText: true,
+      canEditMetadata: true,
       canSearch: true,
       hasChapters: true,
       hasBookmarks: true,
       canSave: false,
-      canSaveAs: false,
+      canSaveAs: true,
+      canReplaceCover: true,
+      canEditStructure: false,
+      canOverwriteOriginal: false,
     },
+  },
+};
+
+const editDraft: EpubEditDraft = {
+  editSessionId: 'edit-0123456789abcdef',
+  documentId: openedEpub.documentId,
+  sourcePath: openedEpub.displayPath,
+  publicationId: openedEpub.document.publicationId,
+  opfResourceId: openedEpub.document.packageResourceId,
+  metadata: {
+    title: openedEpub.document.metadata.title,
+    creators: openedEpub.document.metadata.creators,
+    contributors: [],
+    language: 'zh-CN',
+    publisher: null,
+    description: null,
+    identifier: 'urn:test',
+    publicationDate: null,
+    subjects: [],
+    rights: [],
+  },
+  cover: {
+    state: 'unchanged',
+    originalResourceId: null,
+    currentResourceId: null,
+    previewResourceId: null,
+    mediaType: null,
+    width: null,
+    height: null,
+  },
+  changes: { metadataFields: [], coverChanged: false, modifiedChapters: [], addedResources: 0 },
+  dirty: false,
+  validation: { errors: [], warnings: [], information: [], canSave: false },
+  revision: 0,
+  savedRevision: 0,
+  saving: false,
+  createdAtMs: 1,
+  updatedAtMs: 1,
+};
+
+const chapterDraft: ChapterEditDto = {
+  chapterEditId: 'chapter-edit-0001',
+  editSessionId: editDraft.editSessionId,
+  documentId: openedEpub.documentId,
+  spineIndex: 0,
+  manifestItemId: 'chapter',
+  chapterHref: 'EPUB/chapter.xhtml',
+  chapterTitle: '第一章',
+  originalResourceHash: 'chapter-fingerprint',
+  editorDocument: {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text: '可视化编辑正文' }] }],
+  },
+  compatibilityLevel: 'full',
+  warnings: [],
+  revision: 0,
+  acceptedRevision: 0,
+  dirty: false,
+  validationState: 'valid',
+  previewRevision: 0,
+  capabilities: {
+    canEdit: true,
+    canFormat: true,
+    canEditLinks: true,
+    canImportImages: true,
+    canPreview: true,
+    canRevert: false,
   },
 };
 
@@ -93,6 +165,7 @@ const openedText: OpenedTextDocumentDto = {
   sizeBytes: 28,
   readOnly: false,
   revision: 0,
+  bookmarks: [],
 };
 
 vi.mock('./lib/services/epubDocumentService', async (importOriginal) => ({
@@ -104,12 +177,34 @@ vi.mock('./lib/services/epubDocumentService', async (importOriginal) => ({
   deleteEpubBookmark: vi.fn(),
   searchEpubDocument: vi.fn(async () => []),
   cancelEpubSearch: vi.fn(async () => {}),
+  beginEpubEdit: vi.fn(async () => editDraft),
+  beginEpubChapterEdit: vi.fn(async () => chapterDraft),
+  updateEpubChapterDraft: vi.fn(),
+  flushEpubChapterDraft: vi.fn(),
+  validateEpubChapterDraft: vi.fn(async () => chapterDraft),
+  closeEpubChapterEdit: vi.fn(async () => {}),
+  updateEpubMetadata: vi.fn(async () => editDraft),
+  replaceEpubCover: vi.fn(async () => editDraft),
+  removeEpubCoverChange: vi.fn(async () => editDraft),
+  discardEpubDraft: vi.fn(async () => {}),
+  listRecentDocuments: vi.fn(async () => []),
+  deleteRecentDocument: vi.fn(async () => {}),
 }));
 
 vi.mock('./lib/services/textDocumentService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./lib/services/textDocumentService')>()),
   openTextDocument: vi.fn(async () => openedText),
   closeTextDocument: vi.fn(async () => {}),
+  saveTextBookmark: vi.fn(async () => ({
+    bookmarkId: 'tbm-test',
+    characterOffset: 0,
+    lineNumber: 1,
+    title: null,
+    preview: openedText.content,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  })),
+  deleteTextBookmark: vi.fn(async () => {}),
 }));
 
 vi.mock('./lib/services/workspaceFileService', async (importOriginal) => ({
@@ -118,10 +213,190 @@ vi.mock('./lib/services/workspaceFileService', async (importOriginal) => ({
 }));
 
 import App from './App.svelte';
-import { openEpubDocument } from './lib/services/epubDocumentService';
-import { openTextDocument } from './lib/services/textDocumentService';
+import {
+  deleteRecentDocument,
+  listRecentDocuments,
+  openEpubDocument,
+} from './lib/services/epubDocumentService';
+import { openTextDocument, saveTextBookmark } from './lib/services/textDocumentService';
 
 describe('EPUB and TXT workspace tabs', () => {
+  it('keeps secondary appearance and heading controls behind the settings button', async () => {
+    render(App);
+
+    expect(screen.queryByText(/阶段\s*[0-9一二三四五六七八九十]/)).toBeNull();
+    expect(screen.queryByText('后端版本')).toBeNull();
+    expect(screen.queryByText('协议版本')).toBeNull();
+    expect(screen.queryByText('文件安全')).toBeNull();
+    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '展开设置面板' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
+
+    expect(screen.getByRole('complementary', { name: '设置' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '收起设置面板' })).toBeNull();
+    expect(screen.getByText('外观')).toBeTruthy();
+    const headingPattern = screen.getByLabelText('TXT 标题识别正则');
+    expect(headingPattern).toBeTruthy();
+
+    await fireEvent.input(headingPattern, { target: { value: '[' } });
+    expect(screen.getByRole('alert').textContent).toContain('仍继续使用上一次有效规则');
+    await fireEvent.click(screen.getByText('恢复默认规则'));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('deletes a recent document through the backend and removes the row immediately', async () => {
+    vi.mocked(listRecentDocuments).mockResolvedValueOnce([{
+      path: 'C:\\最近.txt',
+      documentKind: 'txt',
+      displayTitle: '最近.txt',
+      author: null,
+      fingerprint: null,
+      lastOpenedAtMs: 1,
+      available: true,
+    }]);
+    render(App);
+    const removeButton = await screen.findByRole('button', { name: '从最近文件中移除 最近.txt' });
+
+    await fireEvent.click(removeButton);
+
+    await waitFor(() => expect(deleteRecentDocument).toHaveBeenCalledWith('C:\\最近.txt'));
+    expect(screen.queryByText('最近.txt')).toBeNull();
+  });
+
+  it('opens the persisted library, filters books and returns to the workspace from a card', async () => {
+    vi.mocked(listRecentDocuments).mockResolvedValueOnce([
+      {
+        path: 'C:\\测试.epub',
+        documentKind: 'epub',
+        displayTitle: '测试 EPUB',
+        author: '作者',
+        fingerprint: 'epub-fingerprint',
+        lastOpenedAtMs: 2,
+        available: true,
+      },
+      {
+        path: 'C:\\并行.txt',
+        documentKind: 'txt',
+        displayTitle: '并行.txt',
+        author: null,
+        fingerprint: null,
+        lastOpenedAtMs: 1,
+        available: true,
+      },
+    ]);
+    render(App);
+
+    await fireEvent.click(await screen.findByRole('button', { name: '书库' }));
+    expect(await screen.findByRole('heading', { name: '书库' })).toBeTruthy();
+    await fireEvent.input(screen.getByLabelText('搜索书库'), { target: { value: '作者' } });
+    expect(screen.getByRole('heading', { name: '测试 EPUB' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '并行.txt' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '打开 测试 EPUB' }));
+
+    await waitFor(() => expect(openEpubDocument).toHaveBeenCalledWith('C:\\测试.epub'));
+    expect(await screen.findByRole('region', { name: 'EPUB 阅读器' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '阅读与编辑' }).getAttribute('aria-current')).toBe('page');
+  });
+
+  it('keeps the active TXT content when visiting the library and returning', async () => {
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\并行.txt');
+    const { container } = render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+    await waitFor(() => expect(container.querySelector('.cm-content')?.textContent).toBe(openedText.content));
+    await fireEvent.click(screen.getByRole('button', { name: '书库' }));
+    expect(await screen.findByRole('heading', { name: '书库' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: '阅读与编辑' }));
+
+    await waitFor(() => expect(container.querySelector('.cm-content')?.textContent).toBe(openedText.content));
+  });
+
+  it('shows recognized headings in the TXT outline after opening a text document', async () => {
+    vi.mocked(openTextDocument).mockResolvedValueOnce({
+      ...openedText,
+      content: '序章 起点\n普通内容\n第十二章 风起',
+    });
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\并行.txt');
+    render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+
+    expect(await screen.findByRole('button', { name: '第 1 行 序章 起点' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '第 3 行 第十二章 风起' })).toBeTruthy();
+  });
+
+  it('searches the active TXT document and persists a bookmark at the current cursor', async () => {
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\并行.txt');
+    render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+    await screen.findByLabelText('TXT 文本编辑器');
+
+    await fireEvent.input(screen.getByLabelText('TXT 全文检索'), {
+      target: { value: 'EPUB' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: '搜索 TXT 全文' }));
+
+    const result = screen.getByRole('button', {
+      name: `第 1 行 · ${openedText.content}`,
+    });
+    await fireEvent.click(result);
+    await fireEvent.click(screen.getByRole('button', { name: '添加 TXT 书签' }));
+
+    await waitFor(() => {
+      expect(saveTextBookmark).toHaveBeenCalledWith(
+        openedText.documentId,
+        6,
+        1,
+        null,
+        openedText.content,
+      );
+    });
+    expect(within(screen.getByLabelText('TXT 书签')).getByRole('button', {
+      name: `第 1 行 · ${openedText.content}`,
+    })).toBeTruthy();
+  });
+
+  it('collapses and expands both side regions while keeping the document workspace', async () => {
+    const { container } = render(App);
+
+    expect(screen.getByRole('complementary', { name: '主导航' })).toBeTruthy();
+    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '收起左侧栏' }));
+    expect(screen.queryByRole('complementary', { name: '主导航' })).toBeNull();
+    expect(screen.getByRole('main')).toBeTruthy();
+    expect(container.querySelector('.brand')?.classList.contains('compact')).toBe(true);
+    expect((container.querySelector('.left-divider') as HTMLElement).style.gridColumn).toBe('2');
+    expect(screen.getByRole('main').style.gridColumn).toBe('3');
+    expect(container.querySelector('.right-divider')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: '展开左侧栏' }));
+    expect(screen.getByRole('complementary', { name: '主导航' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
+    expect(screen.getByRole('complementary', { name: '设置' })).toBeTruthy();
+    expect((container.querySelector('.right-divider') as HTMLElement).style.gridColumn).toBe('4');
+    expect((container.querySelector('.inspector-slot') as HTMLElement).style.gridColumn).toBe('5');
+    await fireEvent.click(screen.getAllByRole('button', { name: '关闭设置' }).at(-1)!);
+    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+  });
+
+  it('resizes the document region from accessible pane separators', async () => {
+    render(App);
+    const leftSeparator = screen.getByRole('separator', { name: '调整左侧栏宽度' });
+    expect(leftSeparator.getAttribute('aria-valuenow')).toBe('220');
+
+    await fireEvent.pointerDown(leftSeparator, { button: 0, clientX: 220 });
+    await fireEvent.pointerMove(window, { clientX: 300 });
+    await fireEvent.pointerUp(window);
+    expect(leftSeparator.getAttribute('aria-valuenow')).toBe('300');
+
+    await fireEvent.keyDown(leftSeparator, { key: 'ArrowRight' });
+    expect(leftSeparator.getAttribute('aria-valuenow')).toBe('312');
+  });
+
   it('lazy-loads only the active reader and preserves both document tabs', async () => {
     fixtures.chooseDocumentFile
       .mockResolvedValueOnce('C:\\测试.epub')
@@ -161,5 +436,56 @@ describe('EPUB and TXT workspace tabs', () => {
       expect(openTextDocument).toHaveBeenCalledWith('C:\\随笔.markdown', null, false);
     });
     expect(screen.queryByText('松开以打开文件')).toBeNull();
+  });
+
+  it('shows metadata editing only from capabilities and creates the draft on demand', async () => {
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\测试.epub');
+    render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+    const editButton = await screen.findByRole('button', { name: '编辑书籍信息' });
+    expect(editButton).toBeTruthy();
+    await fireEvent.click(editButton);
+    expect(await screen.findByRole('complementary', { name: '编辑书籍信息' })).toBeTruthy();
+    const { beginEpubEdit } = await import('./lib/services/epubDocumentService');
+    expect(beginEpubEdit).toHaveBeenCalledWith(openedEpub.documentId);
+  });
+
+  it('loads the Tiptap chapter editor only after the explicit editing action', async () => {
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\测试.epub');
+    const { container } = render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+    await screen.findByRole('region', { name: 'EPUB 阅读器' });
+    expect(container.querySelector('.ProseMirror')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '编辑当前章节' }));
+    expect(await screen.findByRole('region', { name: 'EPUB 章节编辑器' })).toBeTruthy();
+    await waitFor(() => expect(container.querySelector('.ProseMirror')).not.toBeNull());
+    expect(screen.getByRole('button', { name: '退出章节编辑' })).toBeTruthy();
+    const { beginEpubChapterEdit } = await import('./lib/services/epubDocumentService');
+    expect(beginEpubChapterEdit).toHaveBeenCalledWith(editDraft.editSessionId, 0);
+  });
+
+  it('does not expose editing for a capability-read-only EPUB', async () => {
+    vi.mocked(openEpubDocument).mockResolvedValueOnce({
+      ...openedEpub,
+      document: {
+        ...openedEpub.document,
+        capabilities: {
+          ...openedEpub.document.capabilities,
+          canEditText: false,
+          canEditMetadata: false,
+          canReplaceCover: false,
+          canSaveAs: false,
+        },
+      },
+    });
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\只读.epub');
+    render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+    await screen.findByRole('region', { name: 'EPUB 阅读器' });
+    expect(screen.queryByRole('button', { name: '编辑书籍信息' })).toBeNull();
   });
 });

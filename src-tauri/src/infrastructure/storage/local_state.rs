@@ -5,10 +5,13 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::epub_document::{EpubBookmark, EpubLocator},
+    domain::{
+        epub_document::{EpubBookmark, EpubLocator},
+        text_document::TextBookmark,
+    },
     error::AppError,
 };
 
@@ -27,6 +30,7 @@ pub(crate) struct RecentDocument {
     pub author: Option<String>,
     pub fingerprint: Option<String>,
     pub last_opened_at_ms: u64,
+    pub available: bool,
 }
 
 pub(crate) struct RecentDocumentRecord<'a> {
@@ -35,6 +39,14 @@ pub(crate) struct RecentDocumentRecord<'a> {
     pub display_title: &'a str,
     pub author: Option<&'a str>,
     pub fingerprint: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextBookmarkLocator {
+    version: u8,
+    character_offset: usize,
+    line_number: usize,
 }
 
 impl LocalStateStore {
@@ -97,17 +109,33 @@ impl LocalStateStore {
         let rows = statement
             .query_map([maximum.clamp(1, 100) as i64], |row| {
                 let timestamp: i64 = row.get(5)?;
+                let path: String = row.get(0)?;
+                let available = Path::new(&path).is_file();
                 Ok(RecentDocument {
-                    path: row.get(0)?,
+                    path,
                     document_kind: row.get(1)?,
                     display_title: row.get(2)?,
                     author: row.get(3)?,
                     fingerprint: row.get(4)?,
                     last_opened_at_ms: timestamp.max(0) as u64,
+                    available,
                 })
             })
             .map_err(storage_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    pub(crate) fn delete_recent(&self, document_path: &Path) -> Result<(), AppError> {
+        let path = document_path.to_string_lossy();
+        self.connection
+            .lock()
+            .map_err(|_| storage_lock_error())?
+            .execute(
+                "DELETE FROM recent_documents WHERE path = ?1",
+                [path.as_ref()],
+            )
+            .map_err(storage_error)?;
+        Ok(())
     }
 
     pub(crate) fn save_epub_progress(
@@ -283,6 +311,98 @@ impl LocalStateStore {
             .map_err(storage_error)?;
         Ok(())
     }
+
+    pub(crate) fn save_text_bookmark(
+        &self,
+        document_path: &Path,
+        bookmark: &TextBookmark,
+    ) -> Result<(), AppError> {
+        let locator_json = serde_json::to_string(&TextBookmarkLocator {
+            version: 1,
+            character_offset: bookmark.character_offset,
+            line_number: bookmark.line_number,
+        })
+        .map_err(|_| AppError::internal("LOCAL_STATE_WRITE_FAILED", "serialize TXT bookmark"))?;
+        let path = document_path.to_string_lossy();
+        self.connection
+            .lock()
+            .map_err(|_| storage_lock_error())?
+            .execute(
+                "INSERT INTO bookmarks
+                   (bookmark_id, document_path, document_kind, fingerprint, locator_json,
+                    title, chapter_title, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'txt', '', ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(bookmark_id) DO UPDATE SET
+                   document_path = excluded.document_path,
+                   document_kind = excluded.document_kind,
+                   fingerprint = excluded.fingerprint,
+                   locator_json = excluded.locator_json,
+                   title = excluded.title,
+                   chapter_title = excluded.chapter_title,
+                   updated_at_ms = excluded.updated_at_ms",
+                params![
+                    bookmark.bookmark_id,
+                    path.as_ref(),
+                    locator_json,
+                    bookmark.title,
+                    bookmark.preview,
+                    to_sql_integer(bookmark.created_at_ms)?,
+                    to_sql_integer(bookmark.updated_at_ms)?,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn text_bookmarks(
+        &self,
+        document_path: &Path,
+    ) -> Result<Vec<TextBookmark>, AppError> {
+        let path = document_path.to_string_lossy();
+        let connection = self.connection.lock().map_err(|_| storage_lock_error())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT bookmark_id, locator_json, title, chapter_title,
+                        created_at_ms, updated_at_ms
+                 FROM bookmarks WHERE document_path = ?1 AND document_kind = 'txt'
+                 ORDER BY created_at_ms ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = statement
+            .query_map([path.as_ref()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(storage_error)?;
+        let mut bookmarks = Vec::new();
+        for row in rows {
+            let (bookmark_id, locator_json, title, preview, created, updated) =
+                row.map_err(storage_error)?;
+            let locator: TextBookmarkLocator =
+                serde_json::from_str(&locator_json).map_err(|_| {
+                    AppError::internal("LOCAL_STATE_READ_FAILED", "deserialize TXT bookmark")
+                })?;
+            if locator.version != 1 {
+                continue;
+            }
+            bookmarks.push(TextBookmark {
+                bookmark_id,
+                character_offset: locator.character_offset,
+                line_number: locator.line_number.max(1),
+                title,
+                preview,
+                created_at_ms: created.max(0) as u64,
+                updated_at_ms: updated.max(0) as u64,
+            });
+        }
+        Ok(bookmarks)
+    }
 }
 
 fn configure(connection: &Connection) -> Result<(), AppError> {
@@ -423,6 +543,59 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_recent_document_removes_only_its_history_record() {
+        let directory = tempdir().expect("temporary directory");
+        let first_path = directory.path().join("first.txt");
+        let second_path = directory.path().join("second.txt");
+        std::fs::write(&first_path, "first").expect("write first document");
+        std::fs::write(&second_path, "second").expect("write second document");
+        let store = LocalStateStore::in_memory().expect("in-memory state");
+        for (path, title) in [(&first_path, "第一本"), (&second_path, "第二本")] {
+            store
+                .record_recent(RecentDocumentRecord {
+                    path,
+                    document_kind: "txt",
+                    display_title: title,
+                    author: None,
+                    fingerprint: None,
+                })
+                .expect("record recent document");
+        }
+
+        store
+            .delete_recent(&first_path)
+            .expect("delete one recent record");
+
+        let recent = store.recent_documents(10).expect("load recent documents");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].path, second_path.to_string_lossy());
+        assert!(recent[0].available);
+        assert_eq!(std::fs::read_to_string(&first_path).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&second_path).unwrap(), "second");
+    }
+
+    #[test]
+    fn missing_recent_documents_remain_visible_but_are_marked_unavailable() {
+        let directory = tempdir().expect("temporary directory");
+        let missing_path = directory.path().join("moved.epub");
+        let store = LocalStateStore::in_memory().expect("in-memory state");
+        store
+            .record_recent(RecentDocumentRecord {
+                path: &missing_path,
+                document_kind: "epub",
+                display_title: "已移动的书",
+                author: Some("作者"),
+                fingerprint: Some("fingerprint"),
+            })
+            .expect("record missing document");
+
+        let recent = store.recent_documents(10).expect("load recent documents");
+
+        assert_eq!(recent.len(), 1);
+        assert!(!recent[0].available);
+    }
+
+    #[test]
     fn epub_progress_round_trips_and_fingerprint_changes_invalidate_it() {
         let store = LocalStateStore::in_memory().expect("in-memory state");
         let path = Path::new("C:/books/readloom.epub");
@@ -466,5 +639,28 @@ mod tests {
         assert_eq!(loaded[0].title.as_deref(), Some("重要位置"));
         assert_eq!(loaded[0].locator.document_id, "doc-0000000000000002");
         assert!(loaded[0].valid);
+    }
+
+    #[test]
+    fn txt_bookmarks_round_trip_through_the_generic_bookmark_table() {
+        let store = LocalStateStore::in_memory().expect("state store");
+        let path = Path::new(r"C:\books\notes.txt");
+        let bookmark = TextBookmark {
+            bookmark_id: "tbm-1".to_owned(),
+            character_offset: 18,
+            line_number: 3,
+            title: Some("关键段落".to_owned()),
+            preview: "第三行关键正文".to_owned(),
+            created_at_ms: 10,
+            updated_at_ms: 11,
+        };
+
+        store
+            .save_text_bookmark(path, &bookmark)
+            .expect("save TXT bookmark");
+        assert_eq!(
+            store.text_bookmarks(path).expect("load TXT bookmarks"),
+            vec![bookmark]
+        );
     }
 }

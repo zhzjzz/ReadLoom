@@ -19,6 +19,7 @@
   } from '../../types/epub';
   import type { AppErrorDto } from '../../types/ipc';
   import { normalizeAppError } from '../../services/backend';
+  import { resizedPaneWidth } from '../../layout/workspaceLayout';
   import {
     parseEpubBridgeMessage,
     parseExternalEpubHref,
@@ -38,7 +39,8 @@
 
   export let document: OpenedEpubDocumentDto;
   export let spineIndex = 0;
-  export let onSpineChange: (index: number) => void;
+  export let modifiedSpineIndices: number[] = [];
+  export let onSpineChange: (index: number) => void | Promise<void>;
   export let onError: (error: AppErrorDto) => void = () => {};
   export let onLocatorChange: (locator: EpubLocator) => void = () => {};
   export let onBookmarksChange: (bookmarks: EpubBookmark[]) => void = () => {};
@@ -67,6 +69,11 @@
   let activeSearchId: string | null = null;
   let searchSequence = 0;
   let externalLink: ExternalEpubTarget | null = null;
+  let readerBody: HTMLDivElement;
+  let tocWidth = 220;
+  let tocResizeStartX = 0;
+  let tocResizeStartWidth = 220;
+  let resizingToc = false;
 
   $: current = document.document.spine[spineIndex] ?? document.document.spine[0];
   $: chapterUrl = current
@@ -91,9 +98,54 @@
   });
 
   onDestroy(() => {
+    endTocResize();
     if (progressTimer) clearTimeout(progressTimer);
     if (activeSearchId) void cancelEpubSearch(document.documentId, activeSearchId);
   });
+
+  function maximumTocWidth(): number {
+    const bodyWidth = readerBody?.clientWidth || 1000;
+    return Math.max(160, Math.min(480, bodyWidth - 360));
+  }
+
+  function beginTocResize(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    tocResizeStartX = event.clientX;
+    tocResizeStartWidth = tocWidth;
+    resizingToc = true;
+    window.addEventListener('pointermove', continueTocResize);
+    window.addEventListener('pointerup', endTocResize);
+    event.preventDefault();
+  }
+
+  function continueTocResize(event: PointerEvent): void {
+    if (!resizingToc) return;
+    tocWidth = resizedPaneWidth(
+      'left',
+      tocResizeStartWidth,
+      tocResizeStartX,
+      event.clientX,
+      160,
+      maximumTocWidth(),
+    );
+  }
+
+  function endTocResize(): void {
+    resizingToc = false;
+    window.removeEventListener('pointermove', continueTocResize);
+    window.removeEventListener('pointerup', endTocResize);
+  }
+
+  function resizeTocFromKeyboard(event: KeyboardEvent): void {
+    let nextWidth: number | null = null;
+    if (event.key === 'ArrowLeft') nextWidth = tocWidth - 12;
+    if (event.key === 'ArrowRight') nextWidth = tocWidth + 12;
+    if (event.key === 'Home') nextWidth = 160;
+    if (event.key === 'End') nextWidth = maximumTocWidth();
+    if (nextWidth === null) return;
+    tocWidth = Math.round(Math.max(160, Math.min(maximumTocWidth(), nextWidth)));
+    event.preventDefault();
+  }
 
   function flattenToc(
     nodes: TocNode[],
@@ -123,6 +175,12 @@
       if (child) return child;
     }
     return null;
+  }
+
+  function isModifiedResource(resourceId: string | null): boolean {
+    if (!resourceId) return false;
+    const index = document.document.spine.findIndex((item) => item.resourceId === resourceId);
+    return index >= 0 && modifiedSpineIndices.includes(index);
   }
 
   function toggleToc(node: VisibleTocNode): void {
@@ -236,7 +294,7 @@
     postReaderState();
   }
 
-  async function addBookmark(): Promise<void> {
+  export async function addBookmark(): Promise<void> {
     try {
       const bookmark = await saveEpubBookmark(currentLocator(), null);
       bookmarks = [...bookmarks, bookmark];
@@ -338,7 +396,7 @@
   <header class="reader-toolbar">
     <button aria-label="上一章" disabled={spineIndex <= 0} onclick={() => changeChapter(spineIndex - 1)} type="button">←</button>
     <div class="chapter-heading">
-      <strong>{currentTitle}</strong>
+      <strong>{currentTitle}{modifiedSpineIndices.includes(spineIndex) ? ' · 已修改' : ''}</strong>
       <span>{spineIndex + 1} / {document.document.spine.length} · {Math.round(currentProgression * 100)}%</span>
     </div>
     <button aria-label="下一章" disabled={spineIndex >= document.document.spine.length - 1} onclick={() => changeChapter(spineIndex + 1)} type="button">→</button>
@@ -386,7 +444,12 @@
     </section>
   {/if}
 
-  <div class="reader-body">
+  <div
+    bind:this={readerBody}
+    class:resizing-toc={resizingToc}
+    class="reader-body"
+    style={`--toc-pane-width:${tocWidth}px`}
+  >
     <aside aria-label="EPUB 目录" class="toc-pane">
       <h2>目录</h2>
       {#if visibleToc.length}
@@ -396,12 +459,29 @@
               {#if node.hasChildren}
                 <button aria-label={`${expandedTocIds.has(node.id) ? '折叠' : '展开'} ${node.label}`} class="toc-toggle" onclick={() => toggleToc(node)} type="button">{expandedTocIds.has(node.id) ? '▾' : '▸'}</button>
               {:else}<span class="toc-spacer"></span>{/if}
-              <button aria-current={node.resourceId === current?.resourceId ? 'page' : undefined} class:active={node.resourceId === current?.resourceId} class="toc-link" disabled={!node.resourceId} onclick={() => navigateTo(node.resourceId, node.fragment)} title={node.label} type="button">{node.label}</button>
+              <button aria-current={node.resourceId === current?.resourceId ? 'page' : undefined} class:active={node.resourceId === current?.resourceId} class="toc-link" disabled={!node.resourceId} onclick={() => navigateTo(node.resourceId, node.fragment)} title={node.label} type="button">
+                <span>{node.label}</span>
+                {#if isModifiedResource(node.resourceId)}<span aria-label="已修改" class="modified-dot" title="章节有未另存的修改"></span>{/if}
+              </button>
             </div>
           {/each}
         </nav>
       {:else}<p>此 EPUB 没有目录，仍可按 spine 顺序阅读。</p>{/if}
     </aside>
+
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (ARIA Window Splitter pattern) -->
+    <div
+      aria-label="调整 EPUB 目录宽度"
+      aria-orientation="vertical"
+      aria-valuemax={maximumTocWidth()}
+      aria-valuemin="160"
+      aria-valuenow={tocWidth}
+      class="toc-resize-grip"
+      onkeydown={resizeTocFromKeyboard}
+      onpointerdown={beginTocResize}
+      role="separator"
+      tabindex="0"
+    ></div>
 
     <div class="viewport-shell">
       {#if current}
@@ -481,6 +561,7 @@
   .chapter-heading { display:grid; min-width:100px; }
   .chapter-heading strong { color:var(--text-primary); font:650 12px/1.25 var(--font-ui); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .chapter-heading span, .progress-save { color:var(--text-tertiary); font:500 9px/1.2 var(--font-ui); }
+  .modified-dot { background:var(--accent,#4b78ff); border-radius:50%; display:inline-block; flex:0 0 auto; height:6px; margin-left:auto; width:6px; }
   .reader-actions { display:flex; gap:5px; margin-left:auto; }
   .layout-warning { background:var(--warning-soft,#fff5d6); border-bottom:1px solid var(--warning); color:var(--text-secondary); font:500 11px/1.4 var(--font-ui); padding:8px 12px; }
   .search-panel, .settings-panel { align-items:center; background:var(--surface-pane); border-bottom:1px solid var(--border-subtle); display:flex; flex-wrap:wrap; gap:12px; padding:8px 12px; }
@@ -488,15 +569,20 @@
   .search-panel label, .settings-panel label, .search-panel span { align-items:center; color:var(--text-secondary); display:flex; font:500 10px/1 var(--font-ui); gap:5px; }
   .settings-panel input[type='range'] { width:90px; }
   .reader-body { display:flex; min-height:0; }
+  .reader-body.resizing-toc { cursor:col-resize; user-select:none; }
   .toc-pane, .side-panel { background:var(--surface-pane); flex:0 0 220px; overflow:auto; padding:16px 10px; }
-  .toc-pane { border-right:1px solid var(--border-subtle); }
+  .toc-pane { flex-basis:var(--toc-pane-width); }
+  .toc-resize-grip { background:var(--surface-chrome); cursor:col-resize; flex:0 0 8px; outline:none; position:relative; }
+  .toc-resize-grip::after { background:transparent; content:''; inset:0 3px; position:absolute; transition:background var(--motion-fast); }
+  .toc-resize-grip:hover::after, .toc-resize-grip:focus-visible::after, .resizing-toc .toc-resize-grip::after { background:var(--accent); }
   .side-panel { border-left:1px solid var(--border-subtle); flex-basis:260px; padding-inline:12px; }
   h2 { color:var(--text-primary); font:650 12px/1.3 var(--font-ui); margin:0 8px 12px; }
   nav { display:grid; gap:2px; }
   .toc-row { align-items:center; display:flex; padding-left:calc(var(--toc-depth) * 12px); }
   .toc-toggle { background:transparent; border:0; flex:0 0 22px; min-height:28px; padding:0; }
   .toc-spacer { flex:0 0 22px; }
-  .toc-link { background:transparent; border-color:transparent; flex:1; min-width:0; overflow:hidden; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+  .toc-link { align-items:center; background:transparent; border-color:transparent; display:flex; flex:1; gap:6px; min-width:0; overflow:hidden; text-align:left; white-space:nowrap; }
+  .toc-link > span:first-child { overflow:hidden; text-overflow:ellipsis; }
   .toc-link.active { background:var(--accent-soft); color:var(--accent-strong); }
   .toc-pane p, .side-panel p, dd, dt { color:var(--text-tertiary); font:400 11px/1.5 var(--font-ui); }
   .viewport-shell { background:var(--surface-canvas); flex:1; min-width:0; padding:12px; position:relative; }
@@ -521,6 +607,6 @@
   dl { display:grid; gap:11px; margin:0; }
   dl div { display:grid; gap:3px; }
   dd { color:var(--text-secondary); margin:0; overflow-wrap:anywhere; }
-  @media (max-width:950px) { .reader-actions button { padding-inline:7px; } .toc-pane { flex-basis:170px; } .side-panel { flex-basis:220px; } }
-  @media (max-width:760px) { .toc-pane { display:none; } .reader-actions button:nth-child(n+4) { display:none; } }
+  @media (max-width:950px) { .reader-actions button { padding-inline:7px; } .side-panel { flex-basis:220px; } }
+  @media (max-width:760px) { .toc-pane, .toc-resize-grip { display:none; } .reader-actions button:nth-child(n+4) { display:none; } }
 </style>

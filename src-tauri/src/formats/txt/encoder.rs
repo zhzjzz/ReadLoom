@@ -69,7 +69,7 @@ fn validate_bom(encoding: TextEncoding, has_bom: bool) -> Result<(), AppError> {
     match (encoding, has_bom) {
         (TextEncoding::Utf16Le | TextEncoding::Utf16Be, false) => Err(AppError::validation(
             "UNSUPPORTED_ENCODING",
-            "阶段 1 的 UTF-16 保存必须包含 BOM。",
+            "UTF-16 保存必须包含 BOM。",
             "保留 BOM，或改用 UTF-8。",
         )),
         (TextEncoding::Gbk | TextEncoding::Gb18030, true) => Err(AppError::validation(

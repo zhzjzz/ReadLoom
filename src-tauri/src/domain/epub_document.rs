@@ -7,6 +7,7 @@ use crate::domain::document::{DocumentCapabilities, DocumentKind};
 pub(crate) struct EpubMetadata {
     pub title: String,
     pub creators: Vec<String>,
+    pub contributors: Vec<String>,
     pub languages: Vec<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
@@ -59,6 +60,7 @@ pub(crate) enum EpubLayout {
 pub(crate) struct ParsedEpubDocument {
     pub kind: DocumentKind,
     pub publication_id: String,
+    pub package_resource_id: String,
     pub version: String,
     pub metadata: EpubMetadata,
     pub cover_resource_id: Option<String>,

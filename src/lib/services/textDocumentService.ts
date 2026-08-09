@@ -5,6 +5,7 @@ import type {
   OpenedTextDocumentDto,
   SaveLineEnding,
   SavedTextDocumentDto,
+  TextBookmark,
   TextEncoding,
 } from '../types/document';
 import { normalizeAppError } from './backend';
@@ -60,6 +61,23 @@ export async function saveTextDocumentAs(
 
 export async function closeTextDocument(documentId: string): Promise<void> {
   await invokeChecked<void>('close_text_document', { request: { documentId } });
+}
+
+export async function saveTextBookmark(
+  documentId: string,
+  characterOffset: number,
+  lineNumber: number,
+  title: string | null,
+  preview: string,
+  bookmarkId: string | null = null,
+): Promise<TextBookmark> {
+  return invokeChecked<TextBookmark>('save_text_bookmark', {
+    request: { documentId, characterOffset, lineNumber, title, preview, bookmarkId },
+  });
+}
+
+export async function deleteTextBookmark(documentId: string, bookmarkId: string): Promise<void> {
+  await invokeChecked<void>('delete_text_bookmark', { request: { documentId, bookmarkId } });
 }
 
 async function invokeChecked<T>(command: string, args: Record<string, unknown>): Promise<T> {

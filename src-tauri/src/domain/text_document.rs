@@ -59,3 +59,15 @@ pub struct SavedTextDocument {
     pub read_only: bool,
     pub revision: u64,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextBookmark {
+    pub bookmark_id: String,
+    pub character_offset: usize,
+    pub line_number: usize,
+    pub title: Option<String>,
+    pub preview: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}

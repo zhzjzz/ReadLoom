@@ -51,6 +51,7 @@ struct EpubSession {
 pub(crate) struct EpubSessionContext {
     pub path: PathBuf,
     pub document_id: String,
+    pub session_id: String,
     pub file_fingerprint: String,
     pub parsed: ParsedEpubDocument,
 }
@@ -126,10 +127,20 @@ impl EpubDocumentService {
         Ok(opened)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn resource(
         &self,
         session_id: &str,
         resource_id: &str,
+    ) -> Result<EpubResourceResponse, AppError> {
+        self.resource_with_override(session_id, resource_id, None)
+    }
+
+    pub(crate) fn resource_with_override(
+        &self,
+        session_id: &str,
+        resource_id: &str,
+        body_override: Option<Vec<u8>>,
     ) -> Result<EpubResourceResponse, AppError> {
         let sessions = self
             .sessions
@@ -147,7 +158,7 @@ impl EpubDocumentService {
             .ok_or_else(resource_blocked)?;
         let path = SafeArchivePath::parse(resource_id)?;
         let class = resource_class(&manifest_item.media_type)?;
-        let body = session.archive.read(&path, class)?;
+        let body = body_override.map_or_else(|| session.archive.read(&path, class), Ok)?;
         validate_resource_body(&manifest_item.media_type, &body)?;
 
         if class == ResourceClass::Xhtml {
@@ -227,6 +238,7 @@ impl EpubDocumentService {
         Ok(EpubSessionContext {
             path: session.path.clone(),
             document_id: session.opened.document_id.clone(),
+            session_id: session.opened.session_id.clone(),
             file_fingerprint: session.opened.file_fingerprint.clone(),
             parsed: session.parsed.clone(),
         })

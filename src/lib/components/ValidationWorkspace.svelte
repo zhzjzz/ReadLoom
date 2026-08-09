@@ -57,7 +57,7 @@
       <h1>输入与缩放检查</h1>
       <p>验证 WebView2 中的中文组合输入、焦点行为与 DPI 缩放。</p>
     </div>
-    <span class="phase-label">阶段 0</span>
+    <span class="validation-label">WebView2 验证</span>
   </header>
 
   <section aria-labelledby="ime-heading" class="validation-section ime-section">
@@ -173,7 +173,7 @@
     margin: 0;
   }
 
-  .phase-label {
+  .validation-label {
     color: var(--text-tertiary);
     font: 600 11px/1 var(--font-ui);
     padding-top: 7px;
@@ -372,7 +372,7 @@
 
     .workspace-header p,
     .section-heading p,
-    .phase-label {
+    .validation-label {
       display: none;
     }
 

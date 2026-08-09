@@ -310,6 +310,21 @@ impl TextDocumentService {
         Ok(())
     }
 
+    pub(crate) fn document_path(&self, document_id: &DocumentId) -> Result<PathBuf, AppError> {
+        self.sessions
+            .lock()
+            .map_err(|_| AppError::internal("INTERNAL", "lock document sessions"))?
+            .get(document_id)
+            .map(|session| session.path.clone())
+            .ok_or_else(|| {
+                AppError::validation(
+                    "DOCUMENT_NOT_FOUND",
+                    "文档会话已经关闭或失效。",
+                    "重新打开文件后再试。",
+                )
+            })
+    }
+
     fn validate_file_size(&self, size_bytes: u64, allow_large: bool) -> Result<(), AppError> {
         if size_bytes > self.limits.maximum_editable_bytes {
             return Err(AppError::validation(
@@ -319,7 +334,7 @@ impl TextDocumentService {
                     size_bytes as f64 / 1_048_576.0,
                     self.limits.maximum_editable_bytes as f64 / 1_048_576.0
                 ),
-                "请选择较小文件；只读大文件模式将在后续阶段提供。",
+                "请选择较小文件；暂不支持只读大文件模式。",
             ));
         }
         if size_bytes > self.limits.confirmation_threshold_bytes && !allow_large {

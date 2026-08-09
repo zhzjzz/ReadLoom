@@ -47,6 +47,7 @@ const openedDocument: OpenedTextDocumentDto = {
   sizeBytes: 24,
   readOnly: false,
   revision: 0,
+  bookmarks: [],
 };
 
 describe('native window close', () => {

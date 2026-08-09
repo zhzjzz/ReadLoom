@@ -1,11 +1,12 @@
-import type { DocumentSession } from './document';
-import type { OpenedEpubDocumentDto } from './epub';
+import type { DocumentSession, TextBookmark } from './document';
+import type { ChapterEditDto, EpubEditDraft, OpenedEpubDocumentDto } from './epub';
 
 export interface TextWorkspaceTab {
   kind: 'txt';
   documentId: string;
   session: DocumentSession;
   content: string;
+  bookmarks: TextBookmark[];
 }
 
 export interface EpubWorkspaceTab {
@@ -13,6 +14,11 @@ export interface EpubWorkspaceTab {
   documentId: string;
   document: OpenedEpubDocumentDto;
   spineIndex: number;
+  editDraft: EpubEditDraft | null;
+  editPanelOpen: boolean;
+  chapterEditMode: boolean;
+  activeChapterDraft: ChapterEditDto | null;
+  saving: boolean;
 }
 
 export type WorkspaceTab = TextWorkspaceTab | EpubWorkspaceTab;

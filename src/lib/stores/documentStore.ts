@@ -20,7 +20,7 @@ export function createDocumentStore() {
   return {
     subscribe,
     open(document: OpenedTextDocumentDto): void {
-      const { content: _content, ...metadata } = document;
+      const { content: _content, bookmarks: _bookmarks, ...metadata } = document;
       set({
         active: {
           ...metadata,

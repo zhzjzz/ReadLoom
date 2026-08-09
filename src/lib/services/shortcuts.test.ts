@@ -29,4 +29,33 @@ describe('document shortcuts', () => {
 
     expect(actions.save).not.toHaveBeenCalled();
   });
+
+  it('routes chapter mode and navigation while allowing rich-text Ctrl+B to continue', () => {
+    const actions = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      close: vi.fn(),
+      toggleEdit: vi.fn(),
+      previousChapter: vi.fn(),
+      nextChapter: vi.fn(),
+      bookmark: vi.fn(() => false),
+    };
+    const handler = createShortcutHandler(actions);
+    const edit = new KeyboardEvent('keydown', { key: 'e', ctrlKey: true, cancelable: true });
+    const previous = new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, cancelable: true });
+    const next = new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, cancelable: true });
+    const bold = new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, cancelable: true });
+
+    handler(edit);
+    handler(previous);
+    handler(next);
+    handler(bold);
+
+    expect(actions.toggleEdit).toHaveBeenCalledOnce();
+    expect(actions.previousChapter).toHaveBeenCalledOnce();
+    expect(actions.nextChapter).toHaveBeenCalledOnce();
+    expect(actions.bookmark).toHaveBeenCalledOnce();
+    expect(bold.defaultPrevented).toBe(false);
+  });
 });

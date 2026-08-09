@@ -87,6 +87,7 @@ $artifactDirectory = Join-Path $projectRoot 'target\validation'
 New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
 $screenshotPath = Join-Path $artifactDirectory 'stage3-epub-ui.png'
 $fallbackScreenshotPath = Join-Path $artifactDirectory 'stage3-unified-open-ui.png'
+$libraryScreenshotPath = Join-Path $artifactDirectory 'stage3-library-ui.png'
 $fallbackMarker = '未知扩展名已按文本成功打开'
 [System.IO.File]::WriteAllText($TextFallbackPath, $fallbackMarker, [System.Text.UTF8Encoding]::new($false))
 
@@ -495,6 +496,147 @@ try {
         }
     } while ($fallbackState.editorText -notlike "*$fallbackMarker*" -or $fallbackState.epubFrameCount -ne 0)
 
+    $initialTextBookmarkCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.text-bookmark-items article').length"
+    $textSearchStarted = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const input = document.querySelector('input[aria-label="TXT 全文检索"]');
+  if (!(input instanceof HTMLInputElement) || !input.form) return false;
+  input.value = '未知扩展名';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.form.requestSubmit();
+  return true;
+})()
+'@
+    if (-not $textSearchStarted) {
+        throw 'The TXT full-text search request could not be submitted.'
+    }
+    $textSearchDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $textSearchResultCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.text-result-items > button').length"
+        if ([DateTime]::UtcNow -gt $textSearchDeadline) {
+            throw 'Timed out waiting for the TXT full-text search result.'
+        }
+    } while ($textSearchResultCount -lt 1)
+
+    $textSearchResultOpened = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const result = document.querySelector('.text-result-items > button');
+  if (!(result instanceof HTMLButtonElement)) return false;
+  result.click();
+  return true;
+})()
+'@
+    if (-not $textSearchResultOpened) {
+        throw 'The TXT search result could not be opened.'
+    }
+
+    $textBookmarkAdded = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const button = document.querySelector('button[aria-label="添加 TXT 书签"]');
+  if (!(button instanceof HTMLButtonElement)) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $textBookmarkAdded) {
+        throw 'The TXT bookmark action was unavailable.'
+    }
+    $textBookmarkDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $textBookmarkCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.text-bookmark-items article').length"
+        if ([DateTime]::UtcNow -gt $textBookmarkDeadline) {
+            throw 'Timed out waiting for the TXT bookmark to appear.'
+        }
+    } while ($textBookmarkCount -le $initialTextBookmarkCount)
+
+    $textClosed = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const toolbar = document.querySelector('nav[aria-label="文本文件操作"]');
+  const button = [...(toolbar?.querySelectorAll('button') ?? [])]
+    .find((candidate) => candidate.textContent?.trim() === '关闭');
+  if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $textClosed) {
+        throw 'The TXT document could not be closed before the persistence check.'
+    }
+    $textCloseDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $textEditorCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.cm-editor').length"
+        if ([DateTime]::UtcNow -gt $textCloseDeadline) {
+            throw 'Timed out waiting for the TXT document to close.'
+        }
+    } while ($textEditorCount -ne 0)
+
+    $textReopenClicked = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find((candidate) => candidate.textContent?.trim() === '打开文件');
+  if (!(button instanceof HTMLButtonElement)) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $textReopenClicked) {
+        throw 'The unified Open File button disappeared before the TXT persistence check.'
+    }
+
+    $dialogDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 100
+        $dialogHandle = [ReadloomUiCloseHarness]::FindFileDialog([uint32]$process.Id)
+        if ([DateTime]::UtcNow -gt $dialogDeadline) {
+            throw 'Timed out waiting for the native file dialog for the TXT persistence check.'
+        }
+    } while ($dialogHandle -eq [IntPtr]::Zero)
+
+    if (-not [ReadloomUiCloseHarness]::SubmitFileDialog($dialogHandle, $TextFallbackPath)) {
+        throw 'The native file dialog did not accept the TXT persistence fixture.'
+    }
+
+    $textReopenDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 50
+        $restoredTextState = Invoke-JavaScript -Socket $socket -Expression @'
+(() => ({
+  editorText: document.querySelector('.cm-content')?.textContent ?? '',
+  bookmarkCount: document.querySelectorAll('.text-bookmark-items article').length
+}))()
+'@
+        if ([DateTime]::UtcNow -gt $textReopenDeadline) {
+            throw "Timed out waiting for the persisted TXT bookmark. Current state: $($restoredTextState | ConvertTo-Json -Compress)"
+        }
+    } while ($restoredTextState.editorText -notlike "*$fallbackMarker*" -or
+        $restoredTextState.bookmarkCount -le $initialTextBookmarkCount)
+
+    $textBookmarkCleanupStarted = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const articles = [...document.querySelectorAll('.text-bookmark-items article')];
+  const button = [...(articles.at(-1)?.querySelectorAll('button') ?? [])]
+    .find((candidate) => candidate.textContent?.trim() === '删除');
+  if (!(button instanceof HTMLButtonElement)) return false;
+  window.confirm = () => true;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $textBookmarkCleanupStarted) {
+        throw 'The temporary TXT bookmark could not be removed after verification.'
+    }
+    $textBookmarkCleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $remainingTextBookmarkCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.text-bookmark-items article').length"
+        if ([DateTime]::UtcNow -gt $textBookmarkCleanupDeadline) {
+            throw 'Timed out removing the temporary TXT bookmark.'
+        }
+    } while ($remainingTextBookmarkCount -gt $initialTextBookmarkCount)
+
     $fallbackScreenshot = Invoke-CdpCommand -Socket $socket -Method 'Page.captureScreenshot' -Parameters @{
         format = 'png'
         captureBeyondViewport = $false
@@ -503,6 +645,91 @@ try {
         $fallbackScreenshotPath,
         [Convert]::FromBase64String($fallbackScreenshot.data)
     )
+
+    $libraryOpened = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find((candidate) => candidate.textContent?.trim() === '书库');
+  if (!(button instanceof HTMLButtonElement)) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $libraryOpened) {
+        throw 'The library navigation action was unavailable.'
+    }
+    $libraryDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $libraryState = Invoke-JavaScript -Socket $socket -Expression @'
+(() => ({
+  visible: document.querySelector('[aria-label="书库"]') !== null,
+  bookCount: document.querySelectorAll('.library-grid .book-card').length,
+  tabCount: document.querySelectorAll('.tabs-strip .tab').length,
+  text: document.querySelector('[aria-label="书库"]')?.textContent ?? ''
+}))()
+'@
+        if ([DateTime]::UtcNow -gt $libraryDeadline) {
+            throw "Timed out waiting for the populated library. Current state: $($libraryState | ConvertTo-Json -Compress)"
+        }
+    } while (-not $libraryState.visible -or $libraryState.bookCount -lt 2 -or
+        $libraryState.text -notlike '*阅织阶段三验收书*')
+
+    $libraryFiltered = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const input = document.querySelector('input[aria-label="搜索书库"]');
+  if (!(input instanceof HTMLInputElement)) return false;
+  input.value = '阅织阶段三验收书';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()
+'@
+    if (-not $libraryFiltered) {
+        throw 'The library search control was unavailable.'
+    }
+    $libraryFilterDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $filteredLibraryCount = Invoke-JavaScript -Socket $socket -Expression "document.querySelectorAll('.library-grid .book-card').length"
+        if ([DateTime]::UtcNow -gt $libraryFilterDeadline) {
+            throw 'Timed out waiting for the filtered library result.'
+        }
+    } while ($filteredLibraryCount -ne 1)
+
+    $libraryScreenshot = Invoke-CdpCommand -Socket $socket -Method 'Page.captureScreenshot' -Parameters @{
+        format = 'png'
+        captureBeyondViewport = $false
+    }
+    [System.IO.File]::WriteAllBytes(
+        $libraryScreenshotPath,
+        [Convert]::FromBase64String($libraryScreenshot.data)
+    )
+
+    $libraryBookOpened = Invoke-JavaScript -Socket $socket -Expression @'
+(() => {
+  const button = document.querySelector('button[aria-label="打开 阅织阶段三验收书"]');
+  if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+  button.click();
+  return true;
+})()
+'@
+    if (-not $libraryBookOpened) {
+        throw 'The filtered library book could not be opened.'
+    }
+    $libraryOpenDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 25
+        $libraryReturnState = Invoke-JavaScript -Socket $socket -Expression @'
+(() => ({
+  returned: document.querySelector('[aria-label="EPUB 阅读器"]') !== null &&
+    document.querySelector('[aria-label="书库"]') === null,
+  tabCount: document.querySelectorAll('.tabs-strip .tab').length
+}))()
+'@
+        if ([DateTime]::UtcNow -gt $libraryOpenDeadline) {
+            throw 'Timed out returning from the library to the already-open EPUB tab.'
+        }
+    } while (-not $libraryReturnState.returned -or $libraryReturnState.tabCount -ne $libraryState.tabCount)
 
     $process.Refresh()
     if (-not [ReadloomUiCloseHarness]::PostMessage(
@@ -538,12 +765,21 @@ try {
         fallbackFile = $TextFallbackPath
         fallbackOpenedAsText = $fallbackState.editorText -like "*$fallbackMarker*"
         fallbackKeptEpubTab = $fallbackState.tabText -like '*阅织阶段三验收书*'
+        textSearchResults = $textSearchResultCount
+        textSearchResultOpened = $textSearchResultOpened
+        textBookmarkPersistedAfterReopen = $restoredTextState.bookmarkCount -gt $initialTextBookmarkCount
+        textBookmarkCleanupRestoredCount = $remainingTextBookmarkCount -eq $initialTextBookmarkCount
+        libraryBookCount = $libraryState.bookCount
+        libraryFilteredResults = $filteredLibraryCount
+        libraryReturnedToOpenEpub = $libraryReturnState.returned
+        libraryReusedExistingTab = $libraryReturnState.tabCount -eq $libraryState.tabCount
         epubWorkingSetBytes = [int64]$epubWorkingSetBytes
         epubPrivateMemoryBytes = [int64]$epubPrivateMemoryBytes
         exited = $true
         exitCode = $process.ExitCode
         screenshot = $screenshotPath
         fallbackScreenshot = $fallbackScreenshotPath
+        libraryScreenshot = $libraryScreenshotPath
     }
 }
 finally {

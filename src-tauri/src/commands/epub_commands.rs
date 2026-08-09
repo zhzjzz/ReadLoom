@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tauri::State;
 
 use crate::{
-    application::epub_document_service::EpubDocumentService,
+    application::{epub_document_service::EpubDocumentService, epub_edit_service::EpubEditService},
     domain::epub_document::{
         EpubBookmark, EpubLocator, EpubSearchRequest, EpubSearchResult, OpenedEpubDocument, TocNode,
     },
@@ -60,6 +60,12 @@ pub(crate) struct ListRecentDocumentsRequest {
     maximum: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteRecentDocumentRequest {
+    path: String,
+}
+
 #[tauri::command]
 pub(crate) fn open_epub_document(
     state: State<'_, EpubDocumentService>,
@@ -105,8 +111,10 @@ pub(crate) fn open_epub_document(
 #[tauri::command]
 pub(crate) fn close_epub_document(
     state: State<'_, EpubDocumentService>,
+    edits: State<'_, EpubEditService>,
     request: CloseEpubDocumentRequest,
 ) -> Result<(), AppError> {
+    edits.close_document(&request.document_id);
     state.close(&request.document_id)
 }
 
@@ -198,6 +206,21 @@ pub(crate) fn list_recent_documents(
     request: ListRecentDocumentsRequest,
 ) -> Result<Vec<RecentDocument>, AppError> {
     local_state.recent_documents(request.maximum.unwrap_or(20))
+}
+
+#[tauri::command]
+pub(crate) fn delete_recent_document(
+    local_state: State<'_, LocalStateStore>,
+    request: DeleteRecentDocumentRequest,
+) -> Result<(), AppError> {
+    if request.path.trim().is_empty() {
+        return Err(AppError::validation(
+            "RECENT_DOCUMENT_PATH_EMPTY",
+            "最近文件路径不能为空。",
+            "刷新最近文件列表后重试。",
+        ));
+    }
+    local_state.delete_recent(Path::new(&request.path))
 }
 
 fn toc_label(nodes: &[TocNode], resource_id: &str) -> Option<String> {

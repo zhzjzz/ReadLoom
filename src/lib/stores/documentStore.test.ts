@@ -16,6 +16,7 @@ const opened: OpenedTextDocumentDto = {
   sizeBytes: 24,
   readOnly: false,
   revision: 0,
+  bookmarks: [],
 };
 
 describe('documentStore', () => {
@@ -38,8 +39,8 @@ describe('documentStore', () => {
     expect(isDirty(get(store).active)).toBe(true);
 
     store.saving();
-    const saved: SavedTextDocumentDto = { ...opened, revision: 1 };
-    delete (saved as Partial<OpenedTextDocumentDto>).content;
+    const { content: _content, bookmarks: _bookmarks, ...openedMetadata } = opened;
+    const saved: SavedTextDocumentDto = { ...openedMetadata, revision: 1 };
     store.saved(saved);
 
     expect(get(store).saveStatus).toBe('idle');

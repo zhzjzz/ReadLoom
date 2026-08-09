@@ -39,3 +39,31 @@ _Avoid_: Scroll offset, page number
 **EPUB Session ID**:
 An unguessable runtime identifier that authorizes access to one open EPUB publication without revealing its filesystem path.
 _Avoid_: Document path, archive name
+
+**Publication Draft**:
+A disposable, runtime-only set of proposed metadata, cover, chapter, and imported-resource changes associated with one open EPUB Document Session.
+_Avoid_: Editable EPUB copy, working archive
+
+**Chapter Edit Draft**:
+A revisioned runtime overlay for one compatible spine item. It keeps the original XHTML, the last saved XHTML, the accepted safe editor document, and the normalized XHTML independently.
+_Avoid_: `innerHTML`, mutable chapter file
+
+**Safe Editor Document**:
+The closed JSON vocabulary shared by Rust and the Tiptap/ProseMirror editor for supported block nodes, inline marks, links, and manifest-backed images. Rust is the authority for validation and serialization.
+_Avoid_: Arbitrary HTML, browser DOM snapshot
+
+**Chapter Compatibility Level**:
+The explicit `full`, `limited`, `read-only`, or `unsupported` result of analyzing a spine item before editing. A lower level is a visible safety boundary, not a silent conversion.
+_Avoid_: Best-effort editable flag, implicit fallback
+
+**Modification Overlay**:
+The minimal set of replacement OPF, cover, compatible chapter, or newly imported image resources applied while repackaging a Publication Draft over its original EPUB entries.
+_Avoid_: Extracted publication, rewritten book tree
+
+**TXT Heading**:
+A line recognized from TXT chapter-title syntax and exposed as a navigable outline entry without modifying the document text.
+_Avoid_: EPUB chapter, parsed document section
+
+**Workspace Pane**:
+A collapsible and resizable supporting region beside the document body, such as navigation or document information.
+_Avoid_: Fixed sidebar, document content

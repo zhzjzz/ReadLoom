@@ -18,19 +18,25 @@ pub(crate) struct DocumentCapabilities {
     pub has_bookmarks: bool,
     pub can_save: bool,
     pub can_save_as: bool,
+    pub can_replace_cover: bool,
+    pub can_edit_structure: bool,
+    pub can_overwrite_original: bool,
 }
 
 impl DocumentCapabilities {
-    pub(crate) const fn epub() -> Self {
+    pub(crate) const fn epub(editable: bool) -> Self {
         Self {
             can_read: true,
-            can_edit_text: false,
-            can_edit_metadata: false,
+            can_edit_text: editable,
+            can_edit_metadata: editable,
             can_search: true,
             has_chapters: true,
             has_bookmarks: true,
             can_save: false,
-            can_save_as: false,
+            can_save_as: editable,
+            can_replace_cover: editable,
+            can_edit_structure: false,
+            can_overwrite_original: false,
         }
     }
 }

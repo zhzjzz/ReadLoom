@@ -10,11 +10,14 @@
   export let displayTitle: string | null = null;
   export let displayPath: string | null = null;
   export let hasDocument = false;
+  export let compact = false;
+  export let settingsOpen = false;
   export let onClose: () => void = () => {};
   export let tabs: WorkspaceTabSummary[] = [];
   export let activeTabId: string | null = null;
   export let onSelectTab: (tabId: string) => void = () => {};
   export let onCloseTab: (tabId: string) => void = () => {};
+  export let onToggleSettings: () => void = () => {};
 
   $: connectionLabel =
     connection.status === 'connected'
@@ -30,7 +33,7 @@
 </script>
 
 <header class="topbar">
-  <div class="brand" aria-label="Readloom 阅织">
+  <div class:compact class="brand" aria-label="Readloom 阅织">
     <span class="brand-mark" aria-hidden="true">R</span>
     <span class="brand-name">Readloom</span>
     <span class="brand-cn">阅织</span>
@@ -63,6 +66,18 @@
 
   <div class="topbar-spacer"></div>
 
+  <button
+    aria-label={settingsOpen ? '关闭设置' : '打开设置'}
+    class:active={settingsOpen}
+    class="settings-button"
+    onclick={onToggleSettings}
+    title={settingsOpen ? '关闭设置' : '设置'}
+    type="button"
+  >
+    <Icon name="settings" size={16} />
+    <span>设置</span>
+  </button>
+
   <div class="connection-summary" data-status={connection.status}>
     <span class="status-dot"></span>
     <span>{connectionLabel}</span>
@@ -83,8 +98,21 @@
     border-right: 1px solid var(--border-subtle);
     display: flex;
     gap: 9px;
+    flex: 0 0 var(--left-pane-width);
+    overflow: hidden;
     padding: 0 17px;
     width: var(--left-pane-width);
+  }
+
+  .brand.compact {
+    flex-basis: 56px;
+    padding-inline: 17px;
+    width: 56px;
+  }
+
+  .brand.compact .brand-name,
+  .brand.compact .brand-cn {
+    display: none;
   }
 
   .brand-mark {
@@ -214,6 +242,24 @@
     flex: 1;
   }
 
+  .settings-button {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-left: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    display: flex;
+    font: 600 11px/1 var(--font-ui);
+    gap: 7px;
+    padding: 0 14px;
+  }
+
+  .settings-button:hover,
+  .settings-button.active {
+    background: var(--surface-hover);
+    color: var(--accent-strong);
+  }
+
   .connection-summary {
     align-items: center;
     color: var(--text-tertiary);
@@ -240,18 +286,6 @@
 
   [data-status='browser-preview'] .status-dot {
     background: var(--text-tertiary);
-  }
-
-  @media (max-width: 1050px) {
-    .brand {
-      justify-content: center;
-      padding: 0;
-    }
-
-    .brand-name,
-    .brand-cn {
-      display: none;
-    }
   }
 
   @media (max-width: 780px) {

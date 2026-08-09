@@ -20,7 +20,7 @@ fn user_can_open_utf8_txt_with_detected_crlf() {
     let path = directory.path().join("中文测试.txt");
     fs::write(&path, "第一行\r\nSecond line\r\n").expect("write fixture");
 
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
     let opened = service
         .open(OpenTextDocument {
             path,
@@ -41,7 +41,7 @@ fn user_can_edit_save_and_reopen_utf8_txt() {
     let directory = test_directory();
     let path = directory.path().join("round-trip.txt");
     fs::write(&path, "before\n").expect("write fixture");
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
     let opened = service
         .open(OpenTextDocument {
             path: path.clone(),
@@ -73,7 +73,7 @@ fn external_modification_blocks_save_without_overwriting_disk() {
     let directory = test_directory();
     let path = directory.path().join("externally-edited.txt");
     fs::write(&path, "opened\n").expect("write fixture");
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
     let opened = service
         .open(OpenTextDocument {
             path: path.clone(),
@@ -106,7 +106,7 @@ fn unrepresentable_gbk_save_leaves_original_file_intact() {
     let directory = test_directory();
     let path = directory.path().join("gbk-protection.txt");
     fs::write(&path, "original\n").expect("write fixture");
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
     let opened = service
         .open(OpenTextDocument {
             path: path.clone(),
@@ -139,7 +139,7 @@ fn save_as_creates_new_file_and_does_not_modify_original() {
     let original = directory.path().join("original.txt");
     let copy = directory.path().join("copy.txt");
     fs::write(&original, "original\r\n").expect("write fixture");
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
     let opened = service
         .open(OpenTextDocument {
             path: original.clone(),
@@ -205,11 +205,11 @@ fn configured_size_boundaries_are_reported_before_reading_content() {
     );
     assert_eq!(rejected.to_dto().code, "FILE_TOO_LARGE");
     assert_eq!(
-        TextDocumentLimits::stage1_default().confirmation_threshold_bytes,
+        TextDocumentLimits::default().confirmation_threshold_bytes,
         40 * 1024 * 1024
     );
     assert_eq!(
-        TextDocumentLimits::stage1_default().maximum_editable_bytes,
+        TextDocumentLimits::default().maximum_editable_bytes,
         160 * 1024 * 1024
     );
 }
@@ -219,7 +219,7 @@ fn unknown_extension_is_opened_as_text() {
     let directory = test_directory();
     let path = directory.path().join("not-text.md");
     fs::write(&path, "text").expect("fixture");
-    let service = TextDocumentService::new(TextDocumentLimits::stage1_default());
+    let service = TextDocumentService::new(TextDocumentLimits::default());
 
     let opened = service
         .open(OpenTextDocument {

@@ -1,14 +1,21 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   import EditorStatusBar from './lib/components/EditorStatusBar.svelte';
   import EditorToolbar from './lib/components/EditorToolbar.svelte';
   import InspectorPane from './lib/components/InspectorPane.svelte';
+  import LibraryView from './lib/components/LibraryView.svelte';
   import NavigationPane from './lib/components/NavigationPane.svelte';
   import TopBar from './lib/components/TopBar.svelte';
   import UnsavedChangesDialog from './lib/components/UnsavedChangesDialog.svelte';
   import TextEditor from './lib/editors/TextEditor.svelte';
+  import { describeTextPosition } from './lib/readers/text/textSearch';
+  import {
+    DEFAULT_TEXT_HEADING_PATTERN,
+    type TextHeading,
+  } from './lib/editors/textHeadings';
+  import { resizedPaneWidth, type WorkspacePaneSide } from './lib/layout/workspaceLayout';
   import {
     hasTauriRuntime,
     normalizeAppError,
@@ -17,17 +24,34 @@
   } from './lib/services/backend';
   import { createShortcutHandler } from './lib/services/shortcuts';
   import {
+    beginEpubEdit,
+    beginEpubChapterEdit,
+    cancelEpubSave,
+    chooseEpubCoverPath,
+    chooseEpubSavePath,
     closeEpubDocument,
+    deleteRecentDocument,
+    discardEpubDraft,
+    epubResourceUrl,
+    getEpubEditDraft,
     listRecentDocuments,
     openEpubDocument,
+    prepareEpubOverwriteConfirmation,
+    removeEpubCoverChange,
+    replaceEpubCover,
+    saveEpubAs,
+    updateEpubMetadata,
+    validateEpubChapterDraft,
   } from './lib/services/epubDocumentService';
   import {
     chooseSavePath,
     closeTextDocument,
+    deleteTextBookmark,
     openTextDocument,
     reopenTextDocument,
     saveTextDocument,
     saveTextDocumentAs,
+    saveTextBookmark,
   } from './lib/services/textDocumentService';
   import {
     chooseDocumentFile,
@@ -46,15 +70,24 @@
     SaveOptions,
     TextEditorHandle,
     TextEncoding,
+    TextBookmark,
   } from './lib/types/document';
   import { isDirty } from './lib/types/document';
-  import type { OpenedEpubDocumentDto, RecentDocumentDto } from './lib/types/epub';
+  import type {
+    ChapterDraftAccepted,
+    ChapterEditDto,
+    EpubEditDraft,
+    EpubMetadataPatch,
+    OpenedEpubDocumentDto,
+    RecentDocumentDto,
+  } from './lib/types/epub';
   import type { AppErrorDto, BackendConnection } from './lib/types/ipc';
   import type { WorkspaceTab, WorkspaceTabSummary } from './lib/types/workspace';
 
   type PendingAction = 'close' | 'exit-edit' | 'open' | 'exit' | 'reopen';
 
   const desktopRuntime = hasTauriRuntime();
+  const headingPatternStorageKey = 'readloom.txt-heading-pattern';
   let connection: BackendConnection = { status: 'checking' };
   let initialContent = '';
   let editorHandle: TextEditorHandle | null = null;
@@ -66,29 +99,74 @@
   let epubError: AppErrorDto | null = null;
   let epubSpineIndex = 0;
   let EpubReaderComponent: typeof import('./lib/readers/epub/EpubReader.svelte').default | null = null;
-  let epubReaderHandle: { flushProgress(): Promise<void> } | null = null;
+  let EpubEditPanelComponent: typeof import('./lib/readers/epub/EpubEditPanel.svelte').default | null = null;
+  let EpubChapterEditorComponent: typeof import('./lib/readers/epub/EpubChapterEditor.svelte').default | null = null;
+  let epubReaderHandle: { flushProgress(): Promise<void>; addBookmark(): Promise<void> } | null = null;
+  let epubChapterEditorHandle: { flushDraft(): Promise<void>; focusEditor(): void } | null = null;
+  let epubEditDraft: EpubEditDraft | null = null;
+  let epubEditPanelOpen = false;
+  let epubChapterEditMode = false;
+  let epubChapterDraft: ChapterEditDto | null = null;
+  let epubChapterLocalDirty = false;
+  let epubSaving = false;
   let tabs: WorkspaceTab[] = [];
   let activeTabId: string | null = null;
   let editorInstanceKey = 0;
   let recentDocuments: RecentDocumentDto[] = [];
+  let activeView: 'workspace' | 'library' = 'workspace';
+  let libraryLoading = false;
+  let textHeadings: TextHeading[] = [];
+  let textBookmarks: TextBookmark[] = [];
+  let headingPattern = DEFAULT_TEXT_HEADING_PATTERN;
+  let headingPatternDraft = DEFAULT_TEXT_HEADING_PATTERN;
+  let headingPatternError: string | null = null;
   let dragActive = false;
+  let leftPaneWidth = 220;
+  let rightPaneWidth = 320;
+  let leftPaneCollapsed = false;
+  let rightPaneCollapsed = true;
+  let resizingPane: WorkspacePaneSide | null = null;
+  let stopPaneResize: (() => void) | null = null;
 
   $: activeDocument = $documentStore.active;
-  $: saving = $documentStore.saveStatus === 'saving';
-  $: dirty = isDirty(activeDocument);
+  $: saving = $documentStore.saveStatus === 'saving' || epubSaving;
+  $: dirty = isDirty(activeDocument) || Boolean(epubEditDraft?.dirty) || epubChapterLocalDirty;
   $: workspaceError = epubError ?? $documentStore.error;
-  $: tabSummaries = summarizeTabs(tabs, activeTabId, activeDocument, epubSpineIndex);
+  $: tabSummaries = summarizeTabs(
+    tabs,
+    activeTabId,
+    activeDocument,
+    epubSpineIndex,
+    epubEditDraft,
+    epubChapterLocalDirty,
+  );
 
   onMount(() => {
     documentStore.reset();
     const disposeTheme = initializeTheme();
+    restoreHeadingPattern();
     void connectBackend();
 
     const shortcutHandler = createShortcutHandler({
       open: () => requestOpen(),
-      save: () => editing && void performSave(false),
-      saveAs: () => editing && void performSave(true),
-      close: () => requestClose(),
+      save: () => activeView === 'workspace' && (epubDocument ? void performEpubSaveAs() : editing && void performSave(false)),
+      saveAs: () => activeView === 'workspace' && (epubDocument ? void performEpubSaveAs() : editing && void performSave(true)),
+      close: () => activeView === 'workspace' && requestClose(),
+      toggleEdit: () => activeView === 'workspace' && (epubDocument ? void toggleEpubChapterEditing() : toggleEditing()),
+      previousChapter: () => activeView === 'workspace' && epubDocument && epubSpineIndex > 0 && void changeEpubSpine(epubSpineIndex - 1),
+      nextChapter: () => activeView === 'workspace' && epubDocument && epubSpineIndex < epubDocument.document.spine.length - 1 && void changeEpubSpine(epubSpineIndex + 1),
+      bookmark: () => {
+        if (activeView !== 'workspace') return false;
+        if (epubDocument && !epubChapterEditMode) {
+          void epubReaderHandle?.addBookmark();
+          return true;
+        }
+        if (activeDocument && editorHandle) {
+          void addActiveTextBookmark();
+          return true;
+        }
+        return false;
+      },
     });
     window.addEventListener('keydown', shortcutHandler, { capture: true });
 
@@ -136,6 +214,7 @@
       disposeTheme();
       unlistenClose?.();
       unlistenDragDrop?.();
+      stopPaneResize?.();
       window.removeEventListener('keydown', shortcutHandler, { capture: true });
     };
   });
@@ -148,7 +227,7 @@
     connection = { status: 'checking' };
     try {
       const startup = await reportFrontendReady();
-      const probe = await probeBackend('阅织阶段 3 EPUB 通信正常');
+      const probe = await probeBackend('阅织 EPUB 通信正常');
       connection = { status: 'connected', startup, probe };
       await refreshRecentDocuments();
     } catch (error) {
@@ -158,15 +237,108 @@
 
   async function refreshRecentDocuments(): Promise<void> {
     if (!desktopRuntime) return;
+    libraryLoading = true;
     try {
-      recentDocuments = await listRecentDocuments(12);
+      recentDocuments = await listRecentDocuments(100);
     } catch {
       // 最近文件是辅助状态，失败不能阻止打开和阅读。
+    } finally {
+      libraryLoading = false;
     }
   }
 
   function openRecent(document: RecentDocumentDto): void {
+    if (!document.available) return;
     void openDocumentPath(document.path);
+  }
+
+  async function showLibrary(): Promise<void> {
+    if (activeView === 'library') return;
+    if (!(await flushActiveEpubChapterDraft())) return;
+    await epubReaderHandle?.flushProgress().catch(() => {});
+    snapshotActiveTab();
+    if (activeDocument) {
+      const activeTextTab = tabs.find((tab) => tab.kind === 'txt' && tab.documentId === activeTabId);
+      if (activeTextTab?.kind === 'txt') initialContent = activeTextTab.content;
+      editorHandle = null;
+      textHeadings = [];
+      editorInstanceKey += 1;
+    }
+    activeView = 'library';
+  }
+
+  function showWorkspace(): void {
+    activeView = 'workspace';
+  }
+
+  async function selectWorkspaceTab(documentId: string): Promise<void> {
+    if (documentId !== activeTabId) await activateTab(documentId);
+    activeView = 'workspace';
+  }
+
+  function maximumPaneWidth(side: WorkspacePaneSide): number {
+    const otherWidth = side === 'left'
+      ? (rightPaneCollapsed ? 0 : rightPaneWidth)
+      : (leftPaneCollapsed ? 0 : leftPaneWidth);
+    return Math.max(180, Math.min(520, window.innerWidth - otherWidth - 360 - 16));
+  }
+
+  function setPaneWidth(side: WorkspacePaneSide, width: number): void {
+    if (side === 'left') leftPaneWidth = width;
+    else rightPaneWidth = width;
+  }
+
+  function beginPaneResize(side: WorkspacePaneSide, event: PointerEvent): void {
+    if (event.button !== 0 || (side === 'left' ? leftPaneCollapsed : rightPaneCollapsed)) return;
+    event.preventDefault();
+    stopPaneResize?.();
+    const startPointerX = event.clientX;
+    const startWidth = side === 'left' ? leftPaneWidth : rightPaneWidth;
+    resizingPane = side;
+
+    const move = (moveEvent: PointerEvent) => {
+      setPaneWidth(side, resizedPaneWidth(
+        side,
+        startWidth,
+        startPointerX,
+        moveEvent.clientX,
+        180,
+        maximumPaneWidth(side),
+      ));
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      resizingPane = null;
+      stopPaneResize = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    stopPaneResize = finish;
+  }
+
+  function resizePaneFromKeyboard(side: WorkspacePaneSide, event: KeyboardEvent): void {
+    const current = side === 'left' ? leftPaneWidth : rightPaneWidth;
+    const direction = side === 'left' ? 1 : -1;
+    let requested: number | null = null;
+    if (event.key === 'ArrowRight') requested = current + 12 * direction;
+    else if (event.key === 'ArrowLeft') requested = current - 12 * direction;
+    else if (event.key === 'Home') requested = 180;
+    else if (event.key === 'End') requested = maximumPaneWidth(side);
+    if (requested === null) return;
+    event.preventDefault();
+    setPaneWidth(side, Math.max(180, Math.min(maximumPaneWidth(side), requested)));
+  }
+
+  async function removeRecent(document: RecentDocumentDto): Promise<void> {
+    try {
+      await deleteRecentDocument(document.path);
+      recentDocuments = recentDocuments.filter((item) => item.path !== document.path);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
   }
 
   function summarizeTabs(
@@ -174,6 +346,8 @@
     currentTabId: string | null,
     currentTextDocument: typeof activeDocument,
     currentEpubSpineIndex: number,
+    currentEpubDraft: EpubEditDraft | null,
+    currentChapterLocalDirty: boolean,
   ): WorkspaceTabSummary[] {
     return workspaceTabs.map((tab) => {
       if (tab.kind === 'txt') {
@@ -196,18 +370,24 @@
         title: tab.document.document.metadata.title,
         path: tab.document.displayPath,
         detail: `${index + 1}/${tab.document.document.spine.length}`,
-        dirty: false,
+        dirty: tab.documentId === currentTabId
+          ? Boolean(currentEpubDraft?.dirty) || currentChapterLocalDirty
+          : Boolean(tab.editDraft?.dirty),
       };
     });
   }
 
   function firstDirtyTabId(): string | null {
     for (const tab of tabs) {
-      if (tab.kind !== 'txt') continue;
-      const session = tab.documentId === activeTabId && activeDocument
-        ? activeDocument
-        : tab.session;
-      if (isDirty(session)) return tab.documentId;
+      if (tab.kind === 'txt') {
+        const session = tab.documentId === activeTabId && activeDocument
+          ? activeDocument
+          : tab.session;
+        if (isDirty(session)) return tab.documentId;
+      } else {
+        const draft = tab.documentId === activeTabId ? epubEditDraft : tab.editDraft;
+        if (draft?.dirty || (tab.documentId === activeTabId && epubChapterLocalDirty)) return tab.documentId;
+      }
     }
     return isDirty(activeDocument) ? activeDocument?.documentId ?? null : null;
   }
@@ -221,10 +401,20 @@
           ...tab,
           session: { ...activeDocument },
           content: editorHandle?.getContent() ?? tab.content,
+          bookmarks: [...textBookmarks],
         };
       }
       if (tab.kind === 'epub' && epubDocument) {
-        return { ...tab, document: epubDocument, spineIndex: epubSpineIndex };
+        return {
+          ...tab,
+          document: epubDocument,
+          spineIndex: epubSpineIndex,
+          editDraft: epubEditDraft,
+          editPanelOpen: epubEditPanelOpen,
+          chapterEditMode: epubChapterEditMode,
+          activeChapterDraft: epubChapterDraft,
+          saving: epubSaving,
+        };
       }
       return tab;
     });
@@ -232,6 +422,7 @@
 
   async function activateTab(documentId: string): Promise<void> {
     if (documentId === activeTabId) return;
+    if (!(await flushActiveEpubChapterDraft())) return;
     await epubReaderHandle?.flushProgress().catch(() => {});
     snapshotActiveTab();
     const target = tabs.find((tab) => tab.documentId === documentId);
@@ -241,11 +432,21 @@
     epubError = null;
     editing = false;
     editorHandle = null;
+    textHeadings = [];
+    textBookmarks = [];
     statistics = { lines: 0, characters: 0 };
     if (target.kind === 'txt') {
       epubDocument = null;
       epubReaderHandle = null;
+      epubEditDraft = null;
+      epubEditPanelOpen = false;
+      epubChapterEditMode = false;
+      epubChapterDraft = null;
+      epubChapterEditorHandle = null;
+      epubChapterLocalDirty = false;
+      epubSaving = false;
       initialContent = target.content;
+      textBookmarks = [...target.bookmarks];
       editorInstanceKey += 1;
       documentStore.restore({ ...target.session });
       return;
@@ -256,6 +457,30 @@
     documentStore.close();
     epubDocument = target.document;
     epubSpineIndex = target.spineIndex;
+    epubEditDraft = target.editDraft;
+    epubEditPanelOpen = target.editPanelOpen;
+    epubChapterEditMode = target.chapterEditMode;
+    epubChapterDraft = target.activeChapterDraft;
+    epubChapterLocalDirty = false;
+    epubSaving = target.saving;
+    if (epubEditPanelOpen) {
+      EpubEditPanelComponent ??= (await import('./lib/readers/epub/EpubEditPanel.svelte')).default;
+    }
+    if (epubChapterEditMode) {
+      EpubChapterEditorComponent ??= (await import('./lib/readers/epub/EpubChapterEditor.svelte')).default;
+    }
+  }
+
+  async function flushActiveEpubChapterDraft(): Promise<boolean> {
+    if (!epubChapterEditMode || !epubChapterEditorHandle) return true;
+    try {
+      await epubChapterEditorHandle.flushDraft();
+      epubChapterLocalDirty = false;
+      return true;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+      return false;
+    }
   }
 
   async function requestCloseTab(documentId: string): Promise<void> {
@@ -283,13 +508,257 @@
     );
   }
 
-  function changeEpubSpine(index: number): void {
+  async function changeEpubSpine(index: number): Promise<void> {
+    if (!epubDocument || index < 0 || index >= epubDocument.document.spine.length) return;
+    if (epubChapterEditMode && !(await flushActiveEpubChapterDraft())) return;
+    if (epubChapterEditMode) {
+      try {
+        const editDraft = epubEditDraft ?? await beginEpubEdit(epubDocument.documentId);
+        updateActiveEpubDraft(editDraft);
+        const nextChapter = await beginEpubChapterEdit(editDraft.editSessionId, index);
+        if (!nextChapter.capabilities.canEdit) {
+          epubChapterEditMode = false;
+          epubChapterEditorHandle = null;
+          epubError = {
+            code: nextChapter.compatibilityLevel === 'unsupported' ? 'CHAPTER_EDITING_NOT_SUPPORTED' : 'CHAPTER_READ_ONLY',
+            message: nextChapter.warnings[0]?.message ?? '此章节无法安全进行可视化编辑。',
+            recoverable: true,
+            suggestedAction: '已切换到安全阅读模式，原章节草稿仍然保留。',
+          };
+        }
+        epubChapterDraft = nextChapter;
+      } catch (error) {
+        epubError = normalizeAppError(error);
+        return;
+      }
+    }
     epubSpineIndex = index;
     tabs = tabs.map((tab) =>
       tab.kind === 'epub' && tab.documentId === activeTabId
         ? { ...tab, spineIndex: index }
         : tab,
     );
+  }
+
+  async function toggleEpubChapterEditing(): Promise<void> {
+    if (!epubDocument || saving || !epubDocument.document.capabilities.canEditText) return;
+    if (epubChapterEditMode) {
+      if (!(await flushActiveEpubChapterDraft())) return;
+      epubChapterEditMode = false;
+      epubChapterEditorHandle = null;
+      snapshotActiveTab();
+      return;
+    }
+    try {
+      const editDraft = epubEditDraft ?? await beginEpubEdit(epubDocument.documentId);
+      updateActiveEpubDraft(editDraft);
+      const chapterDraft = await beginEpubChapterEdit(editDraft.editSessionId, epubSpineIndex);
+      epubChapterDraft = chapterDraft;
+      if (!chapterDraft.capabilities.canEdit) {
+        epubError = {
+          code: chapterDraft.compatibilityLevel === 'unsupported' ? 'CHAPTER_EDITING_NOT_SUPPORTED' : 'CHAPTER_READ_ONLY',
+          message: chapterDraft.warnings[0]?.message ?? '此章节无法安全进行可视化编辑。',
+          recoverable: true,
+          suggestedAction: '本章保持安全阅读模式；不会静默删除不支持结构。',
+        };
+        return;
+      }
+      EpubChapterEditorComponent ??= (await import('./lib/readers/epub/EpubChapterEditor.svelte')).default;
+      epubChapterEditMode = true;
+      epubChapterLocalDirty = chapterDraft.dirty;
+      epubEditPanelOpen = false;
+      epubError = null;
+      snapshotActiveTab();
+      await tick();
+      epubChapterEditorHandle?.focusEditor();
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  function acceptEpubChapterDraft(accepted: ChapterDraftAccepted): void {
+    if (!epubChapterDraft || accepted.chapterEditId !== epubChapterDraft.chapterEditId) return;
+    epubChapterDraft = {
+      ...epubChapterDraft,
+      revision: accepted.clientRevision,
+      acceptedRevision: accepted.acceptedRevision,
+      previewRevision: accepted.previewRevision,
+      dirty: accepted.dirty,
+      warnings: accepted.warnings,
+      validationState: accepted.warnings.length ? 'warning' : 'valid',
+      capabilities: {
+        ...epubChapterDraft.capabilities,
+        canRevert: accepted.dirty,
+      },
+    };
+    if (epubEditDraft) {
+      const modified = new Set(epubEditDraft.changes.modifiedChapters);
+      if (accepted.dirty) modified.add(epubChapterDraft.spineIndex);
+      else modified.delete(epubChapterDraft.spineIndex);
+      const modifiedChapters = [...modified].sort((left, right) => left - right);
+      updateActiveEpubDraft({
+        ...epubEditDraft,
+        revision: accepted.publicationRevision,
+        dirty: Boolean(
+          epubEditDraft.changes.metadataFields.length
+          || epubEditDraft.changes.coverChanged
+          || modifiedChapters.length
+        ),
+        changes: { ...epubEditDraft.changes, modifiedChapters },
+      });
+    }
+    epubChapterLocalDirty = false;
+  }
+
+  async function refreshDraftAfterChapterRevert(reverted: ChapterEditDto): Promise<void> {
+    epubChapterDraft = reverted;
+    epubChapterLocalDirty = reverted.dirty;
+    if (!epubEditDraft) return;
+    try {
+      updateActiveEpubDraft(await getEpubEditDraft(epubEditDraft.editSessionId));
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  function updateActiveEpubDraft(draft: EpubEditDraft | null): void {
+    epubEditDraft = draft;
+    tabs = tabs.map((tab) =>
+      tab.kind === 'epub' && tab.documentId === activeTabId
+        ? { ...tab, editDraft: draft, editPanelOpen: epubEditPanelOpen, saving: epubSaving }
+        : tab,
+    );
+  }
+
+  async function openEpubEditPanel(): Promise<void> {
+    if (!epubDocument?.document.capabilities.canEditMetadata || saving) return;
+    try {
+      const draft = epubEditDraft ?? await beginEpubEdit(epubDocument.documentId);
+      EpubEditPanelComponent ??= (await import('./lib/readers/epub/EpubEditPanel.svelte')).default;
+      epubEditPanelOpen = true;
+      updateActiveEpubDraft(draft);
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  async function changeEpubMetadata(metadataPatch: EpubMetadataPatch): Promise<void> {
+    const draft = epubEditDraft;
+    if (!draft || saving) return;
+    try {
+      updateActiveEpubDraft(await updateEpubMetadata(
+        draft.editSessionId,
+        draft.revision,
+        metadataPatch,
+      ));
+      epubError = null;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  async function chooseAndReplaceEpubCover(): Promise<void> {
+    const draft = epubEditDraft;
+    if (!draft || saving) return;
+    try {
+      const selectedPath = await chooseEpubCoverPath();
+      if (!selectedPath) return;
+      updateActiveEpubDraft(await replaceEpubCover(
+        draft.editSessionId,
+        draft.revision,
+        selectedPath,
+      ));
+      epubError = null;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  async function restoreOriginalEpubCover(): Promise<void> {
+    const draft = epubEditDraft;
+    if (!draft || saving) return;
+    try {
+      updateActiveEpubDraft(await removeEpubCoverChange(draft.editSessionId, draft.revision));
+      epubError = null;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+    }
+  }
+
+  function defaultEpubSavePath(path: string): string {
+    return path.replace(/\.epub$/i, '.edited.epub');
+  }
+
+  async function performEpubSaveAs(): Promise<boolean> {
+    const document = epubDocument;
+    if (!document || saving) return false;
+    if (!(await flushActiveEpubChapterDraft())) return false;
+    const draft = epubEditDraft;
+    if (!draft?.dirty) return false;
+    try {
+      const targetPath = await chooseEpubSavePath(defaultEpubSavePath(document.displayPath));
+      if (!targetPath) return false;
+      epubSaving = true;
+      updateActiveEpubDraft({ ...draft, saving: true });
+      let saved;
+      try {
+        saved = await saveEpubAs(draft.editSessionId, draft.revision, targetPath);
+      } catch (error) {
+        const appError = normalizeAppError(error);
+        if (appError.code !== 'TARGET_ALREADY_EXISTS') throw appError;
+        const confirmed = window.confirm(`目标文件已存在：\n${targetPath}\n\n是否覆盖该目标？原 EPUB 不会被修改。`);
+        if (!confirmed) return false;
+        const token = await prepareEpubOverwriteConfirmation(
+          draft.editSessionId,
+          draft.revision,
+          targetPath,
+        );
+        saved = await saveEpubAs(draft.editSessionId, draft.revision, targetPath, token);
+      }
+      epubSaving = false;
+      updateActiveEpubDraft(saved.draft);
+      if (epubChapterDraft) {
+        epubChapterDraft = await validateEpubChapterDraft(epubChapterDraft.chapterEditId);
+        epubChapterLocalDirty = false;
+      }
+      await refreshRecentDocuments();
+      if (window.confirm(`已安全另存为：\n${saved.targetPath}\n\n是否在新标签中打开？`)) {
+        await openEpubPath(saved.targetPath);
+      }
+      return true;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+      return false;
+    } finally {
+      epubSaving = false;
+      if (epubEditDraft?.saving) updateActiveEpubDraft({ ...epubEditDraft, saving: false });
+    }
+  }
+
+  async function cancelActiveEpubSave(): Promise<void> {
+    if (!epubEditDraft || !epubSaving) return;
+    await cancelEpubSave(epubEditDraft.editSessionId).catch(() => {});
+  }
+
+  async function discardActiveEpubDraft(confirm = true): Promise<boolean> {
+    const draft = epubEditDraft;
+    if (!draft || saving) return false;
+    if (confirm && (draft.dirty || epubChapterLocalDirty) && !window.confirm('确定放弃全部 EPUB 元数据、封面和章节正文修改吗？')) {
+      return false;
+    }
+    try {
+      await discardEpubDraft(draft.editSessionId);
+      epubEditPanelOpen = false;
+      epubChapterEditMode = false;
+      epubChapterDraft = null;
+      epubChapterEditorHandle = null;
+      epubChapterLocalDirty = false;
+      updateActiveEpubDraft(null);
+      return true;
+    } catch (error) {
+      epubError = normalizeAppError(error);
+      return false;
+    }
   }
 
   async function openEpubPath(path: string): Promise<void> {
@@ -305,12 +774,21 @@
       EpubReaderComponent ??= (await import('./lib/readers/epub/EpubReader.svelte')).default;
       editing = false;
       editorHandle = null;
+      textHeadings = [];
+      textBookmarks = [];
       initialContent = '';
       statistics = { lines: 0, characters: 0 };
       encodingRecoveryPath = null;
       epubError = null;
       epubSpineIndex = opened.initialLocator?.spineIndex ?? 0;
       epubDocument = opened;
+      epubEditDraft = null;
+      epubEditPanelOpen = false;
+      epubChapterEditMode = false;
+      epubChapterDraft = null;
+      epubChapterEditorHandle = null;
+      epubChapterLocalDirty = false;
+      epubSaving = false;
       activeTabId = opened.documentId;
       tabs = [
         ...tabs,
@@ -319,6 +797,11 @@
           documentId: opened.documentId,
           document: opened,
           spineIndex: epubSpineIndex,
+          editDraft: null,
+          editPanelOpen: false,
+          chapterEditMode: false,
+          activeChapterDraft: null,
+          saving: false,
         },
       ];
       documentStore.close();
@@ -344,8 +827,25 @@
   }
 
   async function openDocumentPath(path: string): Promise<void> {
+    activeView = 'workspace';
+    const normalizedPath = comparableDocumentPath(path);
+    const openTab = tabs.find((tab) => {
+      const tabPath = tab.kind === 'txt' ? tab.session.displayPath : tab.document.displayPath;
+      return comparableDocumentPath(tabPath) === normalizedPath;
+    });
+    if (openTab) {
+      await selectWorkspaceTab(openTab.documentId);
+      return;
+    }
     if (classifyDocumentPath(path) === 'epub') await openEpubPath(path);
     else await openPath(path, null, false);
+  }
+
+  function comparableDocumentPath(path: string): string {
+    return path
+      .replaceAll('/', '\\')
+      .replace(/^\\\\\?\\/, '')
+      .toLocaleLowerCase('en-US');
   }
 
   async function openDroppedPaths(paths: string[]): Promise<void> {
@@ -381,6 +881,7 @@
             documentId: opened.documentId,
             session: { ...openedSession },
             content: opened.content,
+            bookmarks: [...opened.bookmarks],
           },
         ];
       }
@@ -400,6 +901,8 @@
   function adoptOpenedDocument(opened: OpenedTextDocumentDto): void {
     editing = false;
     editorHandle = null;
+    textHeadings = [];
+    textBookmarks = [...opened.bookmarks];
     statistics = { lines: 0, characters: 0 };
     initialContent = opened.content;
     editorInstanceKey += 1;
@@ -408,7 +911,7 @@
     if (restored) {
       tabs = tabs.map((tab) =>
         tab.kind === 'txt' && tab.documentId === opened.documentId
-          ? { ...tab, session: { ...restored }, content: opened.content }
+          ? { ...tab, session: { ...restored }, content: opened.content, bookmarks: [...opened.bookmarks] }
           : tab,
       );
     }
@@ -418,6 +921,67 @@
     editorHandle = handle;
     editorHandle.setEditing(editing);
     initialContent = '';
+  }
+
+  function updateActiveTextBookmarks(bookmarks: TextBookmark[]): void {
+    textBookmarks = bookmarks;
+    tabs = tabs.map((tab) =>
+      tab.kind === 'txt' && tab.documentId === activeDocument?.documentId
+        ? { ...tab, bookmarks: [...bookmarks] }
+        : tab,
+    );
+  }
+
+  async function addActiveTextBookmark(): Promise<void> {
+    const document = activeDocument;
+    if (!document || !editorHandle) return;
+    const content = editorHandle.getContent();
+    const position = describeTextPosition(content, editorHandle.getCursorOffset());
+    try {
+      const bookmark = await saveTextBookmark(
+        document.documentId,
+        position.characterOffset,
+        position.lineNumber,
+        null,
+        position.preview,
+      );
+      updateActiveTextBookmarks([...textBookmarks, bookmark]);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function renameActiveTextBookmark(bookmark: TextBookmark): Promise<void> {
+    const document = activeDocument;
+    if (!document) return;
+    const title = window.prompt('书签标题', bookmark.title ?? `第 ${bookmark.lineNumber} 行`);
+    if (title === null) return;
+    try {
+      const updated = await saveTextBookmark(
+        document.documentId,
+        bookmark.characterOffset,
+        bookmark.lineNumber,
+        title,
+        bookmark.preview,
+        bookmark.bookmarkId,
+      );
+      updateActiveTextBookmarks(textBookmarks.map((item) =>
+        item.bookmarkId === bookmark.bookmarkId ? updated : item,
+      ));
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function removeActiveTextBookmark(bookmark: TextBookmark): Promise<void> {
+    const document = activeDocument;
+    if (!document || !window.confirm(`删除书签“${bookmark.title ?? `第 ${bookmark.lineNumber} 行`}”？`)) return;
+    try {
+      await deleteTextBookmark(document.documentId, bookmark.bookmarkId);
+      updateActiveTextBookmarks(textBookmarks.filter((item) => item.bookmarkId !== bookmark.bookmarkId));
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
   }
 
   function toggleEditing(): void {
@@ -442,6 +1006,7 @@
   function discardEditingChanges(): void {
     const document = activeDocument;
     editorHandle?.discardChanges();
+    documentStore.markContentDirty(false);
     if (document) {
       documentStore.updateSaveOptions({
         encoding: document.savedEncoding,
@@ -545,6 +1110,13 @@
         epubDocument = null;
         epubReaderHandle = null;
         epubSpineIndex = 0;
+        epubEditDraft = null;
+        epubEditPanelOpen = false;
+        epubChapterEditMode = false;
+        epubChapterDraft = null;
+        epubChapterEditorHandle = null;
+        epubChapterLocalDirty = false;
+        epubSaving = false;
         epubError = null;
         tabs = tabs.filter((tab) => tab.documentId !== closing.documentId);
         activeTabId = null;
@@ -580,7 +1152,8 @@
   async function saveAndContinue(): Promise<void> {
     const action = pendingAction;
     if (!action) return;
-    if (await performSave(Boolean(activeDocument?.readOnly))) {
+    const saved = epubDocument ? await performEpubSaveAs() : await performSave(Boolean(activeDocument?.readOnly));
+    if (saved) {
       pendingAction = null;
       await continueAction(action);
     }
@@ -590,6 +1163,8 @@
     const action = pendingAction;
     if (!action) return;
     pendingAction = null;
+    if (epubEditDraft && !(await discardActiveEpubDraft(false))) return;
+    if (activeDocument && isDirty(activeDocument)) discardEditingChanges();
     if (action === 'exit-edit') {
       discardEditingChanges();
       return;
@@ -599,8 +1174,8 @@
       return;
     }
     if (action === 'exit') {
-      await getCurrentWindow().destroy();
-      return;
+      await tick();
+      return continueExit();
     }
     await closeCurrentDocument();
     if (action === 'open') await performOpen();
@@ -629,34 +1204,127 @@
     setTheme(preference);
   }
 
+  function restoreHeadingPattern(): void {
+    try {
+      const savedPattern = localStorage.getItem(headingPatternStorageKey);
+      if (savedPattern) changeHeadingPattern(savedPattern, false);
+    } catch {
+      // 设置存储不可用时继续使用内置规则。
+    }
+  }
+
+  function changeHeadingPattern(value: string, persist = true): void {
+    headingPatternDraft = value;
+    if (!value.trim()) {
+      headingPatternError = '标题识别正则不能为空。';
+      return;
+    }
+    try {
+      new RegExp(value, 'gm');
+    } catch {
+      headingPatternError = '正则表达式无效，仍继续使用上一次有效规则。';
+      return;
+    }
+    headingPattern = value;
+    headingPatternError = null;
+    if (persist) {
+      try {
+        localStorage.setItem(headingPatternStorageKey, value);
+      } catch {
+        // 设置仍在当前窗口生效。
+      }
+    }
+  }
+
+  function resetHeadingPattern(): void {
+    changeHeadingPattern(DEFAULT_TEXT_HEADING_PATTERN);
+  }
+
   function dismissWorkspaceError(): void {
     epubError = null;
     documentStore.clearError();
   }
 </script>
 
-<div class="app-shell">
+<div
+  class:resizing={Boolean(resizingPane)}
+  class="app-shell"
+  style={`--left-pane-width: ${leftPaneCollapsed ? 0 : leftPaneWidth}px; --right-divider-width: ${rightPaneCollapsed ? 0 : 8}px; --workspace-right-pane-width: ${rightPaneCollapsed ? 0 : rightPaneWidth}px;`}
+>
   <TopBar
     activeTabId={activeTabId}
+    compact={leftPaneCollapsed}
     {connection}
     document={activeDocument}
     displayTitle={epubDocument?.document.metadata.title ?? null}
     displayPath={epubDocument?.displayPath ?? null}
     hasDocument={Boolean(epubDocument)}
+    settingsOpen={!rightPaneCollapsed}
     onClose={requestClose}
     onCloseTab={(documentId) => void requestCloseTab(documentId)}
-    onSelectTab={(documentId) => void activateTab(documentId)}
+    onSelectTab={(documentId) => void selectWorkspaceTab(documentId)}
+    onToggleSettings={() => (rightPaneCollapsed = !rightPaneCollapsed)}
     tabs={tabSummaries}
   />
   <div class="workspace-grid">
-    <NavigationPane
-      {desktopRuntime}
-      {recentDocuments}
-      onOpen={requestOpen}
-      onOpenRecent={openRecent}
-    />
+    {#if !leftPaneCollapsed}
+      <NavigationPane
+        {desktopRuntime}
+        activeView={activeView}
+        recentDocuments={recentDocuments.slice(0, 6)}
+        onOpen={requestOpen}
+        onOpenRecent={openRecent}
+        onRemoveRecent={(document) => void removeRecent(document)}
+        onSelectLibrary={() => void showLibrary()}
+        onSelectWorkspace={showWorkspace}
+        onRevealHeading={(heading) => editorHandle?.revealOffset(heading.from)}
+        activeTextDocument={activeView === 'workspace' && Boolean(activeDocument)}
+        getTextContent={() => editorHandle?.getContent() ?? ''}
+        onAddTextBookmark={() => void addActiveTextBookmark()}
+        onDeleteTextBookmark={(bookmark) => void removeActiveTextBookmark(bookmark)}
+        onRenameTextBookmark={(bookmark) => void renameActiveTextBookmark(bookmark)}
+        onRevealTextOffset={(offset) => editorHandle?.revealOffset(offset)}
+        textHeadings={activeView === 'workspace' ? textHeadings : []}
+        {textBookmarks}
+      />
+    {/if}
+    <div class="pane-divider left-divider" style="grid-column: 2">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (ARIA Window Splitter pattern) -->
+      <div
+        aria-label="调整左侧栏宽度"
+        aria-orientation="vertical"
+        aria-valuemax={maximumPaneWidth('left')}
+        aria-valuemin="180"
+        aria-valuenow={leftPaneWidth}
+        class="resize-grip"
+        onkeydown={(event) => resizePaneFromKeyboard('left', event)}
+        onpointerdown={(event) => beginPaneResize('left', event)}
+        role="separator"
+        tabindex={leftPaneCollapsed ? -1 : 0}
+      ></div>
+      <button
+        aria-label={leftPaneCollapsed ? '展开左侧栏' : '收起左侧栏'}
+        class="pane-toggle"
+        onclick={() => (leftPaneCollapsed = !leftPaneCollapsed)}
+        title={leftPaneCollapsed ? '展开左侧栏' : '收起左侧栏'}
+        type="button"
+      >{leftPaneCollapsed ? '›' : '‹'}</button>
+    </div>
 
-    <main class="document-workspace">
+    <main class="document-workspace" style="grid-column: 3">
+      {#if activeView === 'library'}
+        <div class="library-stage">
+          <LibraryView
+            {desktopRuntime}
+            documents={recentDocuments}
+            loading={libraryLoading}
+            onImport={requestOpen}
+            onOpen={openRecent}
+            onRefresh={() => void refreshRecentDocuments()}
+            onRemove={(document) => void removeRecent(document)}
+          />
+        </div>
+      {:else}
       {#if !epubDocument}
         <EditorToolbar
           {desktopRuntime}
@@ -671,6 +1339,34 @@
           onSaveAs={() => void performSave(true)}
           onToggleEditing={toggleEditing}
         />
+      {:else}
+        <nav aria-label="EPUB 文件操作" class="epub-toolbar">
+          <button disabled={!desktopRuntime || saving} onclick={requestOpen} type="button">打开</button>
+          {#if epubDocument.document.capabilities.canEditMetadata}
+            <button
+              class:editing={epubEditPanelOpen}
+              disabled={saving || epubChapterEditMode}
+              onclick={() => void openEpubEditPanel()}
+              type="button"
+            >
+              编辑书籍信息
+            </button>
+          {/if}
+          {#if epubDocument.document.capabilities.canEditText}
+            <button
+              class:editing={epubChapterEditMode}
+              disabled={saving}
+              onclick={() => void toggleEpubChapterEditing()}
+              type="button"
+            >
+              {epubChapterEditMode ? '退出章节编辑' : '编辑当前章节'}
+            </button>
+          {/if}
+          <span>仅另存为 · 原 EPUB 始终只读</span>
+          <button disabled={saving || !dirty} onclick={() => void performEpubSaveAs()} type="button">另存为</button>
+          <button disabled={saving || !dirty} onclick={() => void discardActiveEpubDraft()} type="button">放弃全部修改</button>
+          <button disabled={saving} onclick={requestClose} type="button">关闭</button>
+        </nav>
       {/if}
 
       {#if workspaceError}
@@ -693,7 +1389,21 @@
       {/if}
 
       <div class="editor-stage">
-        {#if epubDocument && EpubReaderComponent}
+        {#if epubDocument && epubChapterEditMode && epubChapterDraft && EpubChapterEditorComponent}
+          <svelte:component
+            bind:this={epubChapterEditorHandle}
+            this={EpubChapterEditorComponent}
+            chapter={epubChapterDraft}
+            onAccepted={acceptEpubChapterDraft}
+            onChapterChange={(index: number) => void changeEpubSpine(index)}
+            onError={(error: AppErrorDto) => (epubError = error)}
+            onLocalDirty={(value: boolean) => (epubChapterLocalDirty = value)}
+            onReverted={(reverted: ChapterEditDto) => void refreshDraftAfterChapterRevert(reverted)}
+            readingSessionId={epubDocument.sessionId}
+            saving={epubSaving}
+            spineLength={epubDocument.document.spine.length}
+          />
+        {:else if epubDocument && EpubReaderComponent}
           <svelte:component
             bind:this={epubReaderHandle}
             this={EpubReaderComponent}
@@ -701,14 +1411,37 @@
             onBookmarksChange={updateActiveEpubBookmarks}
             onError={(error: AppErrorDto) => (epubError = error)}
             onLocatorChange={updateActiveEpubLocator}
+            modifiedSpineIndices={epubEditDraft?.changes.modifiedChapters ?? []}
             spineIndex={epubSpineIndex}
-            onSpineChange={changeEpubSpine}
+            onSpineChange={(index: number) => void changeEpubSpine(index)}
           />
+          {#if epubEditPanelOpen && epubEditDraft && EpubEditPanelComponent}
+            <svelte:component
+              this={EpubEditPanelComponent}
+              draft={epubEditDraft}
+              previewUrl={epubEditDraft.cover.previewResourceId
+                ? epubResourceUrl(epubDocument.sessionId, epubEditDraft.cover.previewResourceId)
+                : null}
+              saving={epubSaving}
+              onCancelSave={() => void cancelActiveEpubSave()}
+              onClose={() => {
+                epubEditPanelOpen = false;
+                snapshotActiveTab();
+              }}
+              onDiscard={() => void discardActiveEpubDraft()}
+              onMetadataChange={(patch: EpubMetadataPatch) => void changeEpubMetadata(patch)}
+              onReplaceCover={() => void chooseAndReplaceEpubCover()}
+              onRestoreCover={() => void restoreOriginalEpubCover()}
+              onSaveAs={() => void performEpubSaveAs()}
+            />
+          {/if}
         {:else if activeDocument}
           {#key `${activeDocument.documentId}-${editorInstanceKey}`}
             <TextEditor
+              {headingPattern}
               {initialContent}
               onDirtyChange={(value) => documentStore.markContentDirty(value)}
+              onHeadingsChange={(value) => (textHeadings = value)}
               onReady={editorReady}
               onStatisticsChange={(value) => (statistics = value)}
             />
@@ -727,19 +1460,44 @@
           </section>
         {/if}
       </div>
+      {/if}
     </main>
 
-    <InspectorPane
-      {connection}
-      document={activeDocument}
-      onRetry={connectBackend}
-      onThemeChange={changeTheme}
-      theme={$themePreference}
-    />
+    {#if !rightPaneCollapsed}
+      <div class="pane-divider right-divider" style="grid-column: 4">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (ARIA Window Splitter pattern) -->
+        <div
+          aria-label="调整右侧栏宽度"
+          aria-orientation="vertical"
+          aria-valuemax={maximumPaneWidth('right')}
+          aria-valuemin="180"
+          aria-valuenow={rightPaneWidth}
+          class="resize-grip"
+          onkeydown={(event) => resizePaneFromKeyboard('right', event)}
+          onpointerdown={(event) => beginPaneResize('right', event)}
+          role="separator"
+          tabindex="0"
+        ></div>
+      </div>
+      <div class="inspector-slot" style="grid-column: 5">
+        <InspectorPane
+          {headingPatternError}
+          headingPattern={headingPatternDraft}
+          onClose={() => (rightPaneCollapsed = true)}
+          onHeadingPatternChange={changeHeadingPattern}
+          onResetHeadingPattern={resetHeadingPattern}
+          onThemeChange={changeTheme}
+          theme={$themePreference}
+        />
+      </div>
+    {/if}
   </div>
   <EditorStatusBar
-    document={activeDocument}
-    epubStatus={epubDocument ? `EPUB ${epubDocument.document.version} · 只读` : null}
+    document={activeView === 'workspace' ? activeDocument : null}
+    epubStatus={activeView === 'workspace' && epubDocument
+      ? `EPUB ${epubDocument.document.version} · ${epubChapterEditMode ? '章节编辑' : '安全阅读'} · ${dirty ? '有未另存修改' : '原文件只读'}`
+      : null}
+    workspaceStatus={activeView === 'library' ? `书库 · ${recentDocuments.length} 本本地书籍` : null}
     {saving}
     {statistics}
   />
@@ -753,9 +1511,9 @@
   {/if}
 </div>
 
-{#if pendingAction && activeDocument}
+{#if pendingAction && (activeDocument || epubDocument)}
   <UnsavedChangesDialog
-    fileName={activeDocument.fileName}
+    fileName={activeDocument?.fileName ?? epubDocument?.fileName ?? 'EPUB'}
     {saving}
     onCancel={() => (pendingAction = null)}
     onDiscard={() => void discardAndContinue()}
@@ -776,9 +1534,79 @@
 
   .workspace-grid {
     display: grid;
-    grid-template-columns: var(--left-pane-width) minmax(0, 1fr) var(--right-pane-width);
+    grid-template-columns: var(--left-pane-width) 8px minmax(0, 1fr) var(--right-divider-width) var(--workspace-right-pane-width);
     min-height: 0;
     min-width: 0;
+  }
+
+  .pane-divider {
+    background: var(--surface-chrome);
+    position: relative;
+    z-index: 5;
+  }
+
+  .inspector-slot {
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .inspector-slot :global(.inspector-pane) {
+    height: 100%;
+  }
+
+  .resize-grip {
+    background: transparent;
+    border: 0;
+    cursor: col-resize;
+    inset: 0;
+    outline: none;
+    padding: 0;
+    position: absolute;
+    width: 100%;
+  }
+
+  .resize-grip::after {
+    background: transparent;
+    content: '';
+    inset: 0 3px;
+    position: absolute;
+    transition: background var(--motion-fast);
+  }
+
+  .resize-grip:hover::after,
+  .resize-grip:focus-visible::after,
+  .resizing .resize-grip::after {
+    background: var(--accent);
+  }
+
+  .app-shell.resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+
+  .pane-toggle {
+    align-items: center;
+    background: var(--surface-control);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    color: var(--text-tertiary);
+    display: flex;
+    font: 600 16px/1 var(--font-ui);
+    height: 28px;
+    justify-content: center;
+    left: 50%;
+    padding: 0;
+    position: absolute;
+    top: 12px;
+    transform: translateX(-50%);
+    width: 22px;
+    z-index: 1;
+  }
+
+  .pane-toggle:hover {
+    background: var(--surface-hover);
+    color: var(--accent-strong);
   }
 
   .document-workspace {
@@ -788,10 +1616,50 @@
     min-width: 0;
   }
 
+  .library-stage {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+  }
+
   .editor-stage {
     flex: 1;
     min-height: 0;
     min-width: 0;
+    position: relative;
+  }
+
+  .epub-toolbar {
+    align-items: center;
+    background: var(--surface-pane);
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    gap: 7px;
+    min-height: 39px;
+    padding: 0 10px;
+  }
+
+  .epub-toolbar button {
+    background: var(--surface-control);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font: 600 10px/1 var(--font-ui);
+    min-height: 28px;
+    padding: 0 10px;
+  }
+
+  .epub-toolbar button.editing {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-strong);
+  }
+
+  .epub-toolbar span {
+    color: var(--text-disabled);
+    flex: 1;
+    font: 500 9px/1 var(--font-ui);
+    text-align: right;
   }
 
   .empty-state {
@@ -943,13 +1811,4 @@
     font: 500 11px/1.4 var(--font-ui);
   }
 
-  @media (max-width: 980px) {
-    .workspace-grid {
-      grid-template-columns: var(--left-pane-width) minmax(0, 1fr);
-    }
-
-    .workspace-grid :global(.inspector-pane) {
-      display: none;
-    }
-  }
 </style>
