@@ -88,6 +88,7 @@ export interface EpubLocator {
   fragment: string | null;
   progressionInChapter: number;
   characterOffset: number | null;
+  paragraphIndex: number | null;
 }
 
 export interface EpubBookmark {
@@ -118,20 +119,6 @@ export interface EpubSearchResult {
   temporarySnippet: string;
   matchStart: number;
   matchEnd: number;
-}
-
-export interface EpubReadingSettings {
-  fontFamily: 'system' | 'serif' | 'sans';
-  fontSize: number;
-  lineHeight: number;
-  contentWidth: number;
-  pageMargin: number;
-  textAlign: 'start' | 'justify';
-  publisherStyles: 'use' | 'partial' | 'ignore';
-  ignorePublisherFonts: boolean;
-  ignorePublisherColors: boolean;
-  allowInternalFonts: boolean;
-  imageMaximumWidth: number;
 }
 
 export interface RecentDocumentDto {
@@ -289,7 +276,12 @@ export type EpubBridgeMessage =
       documentId: string;
       sessionId: string;
       token: string;
-      payload: { progression: number; fragment: string | null };
+      payload: {
+        progression: number;
+        fragment: string | null;
+        characterOffset: number | null;
+        paragraphIndex: number | null;
+      };
     }
   | {
       source: 'readloom-epub';

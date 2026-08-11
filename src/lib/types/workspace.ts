@@ -7,6 +7,7 @@ export interface TextWorkspaceTab {
   session: DocumentSession;
   content: string;
   bookmarks: TextBookmark[];
+  readingOffset: number;
 }
 
 export interface EpubWorkspaceTab {

@@ -12,25 +12,21 @@
   import type {
     EpubBookmark,
     EpubLocator,
-    EpubReadingSettings,
     EpubSearchResult,
     OpenedEpubDocumentDto,
     TocNode,
   } from '../../types/epub';
+  import { defaultReadingTypographySettings } from '../../stores/appSettings';
+  import { readingFontStack, type ReadingTypographySettings } from '../../types/settings';
   import type { AppErrorDto } from '../../types/ipc';
   import { normalizeAppError } from '../../services/backend';
-  import { resizedPaneWidth } from '../../layout/workspaceLayout';
+  import { resizedPaneWidth, resizedPaneWidthFromKeyboard } from '../../layout/workspaceLayout';
   import {
     parseEpubBridgeMessage,
     parseExternalEpubHref,
     parseInternalEpubHref,
     type ExternalEpubTarget,
   } from './epubBridge';
-  import {
-    loadEpubReadingSettings,
-    normalizeEpubReadingSettings,
-    persistEpubReadingSettings,
-  } from './epubSettings';
 
   interface VisibleTocNode extends TocNode {
     depth: number;
@@ -44,13 +40,13 @@
   export let onError: (error: AppErrorDto) => void = () => {};
   export let onLocatorChange: (locator: EpubLocator) => void = () => {};
   export let onBookmarksChange: (bookmarks: EpubBookmark[]) => void = () => {};
+  export let readingSettings: ReadingTypographySettings = defaultReadingTypographySettings;
+  export let hasCustomBackground = false;
 
   let iframe: HTMLIFrameElement | null = null;
   let showMetadata = false;
-  let showSettings = false;
   let showSearch = false;
   let showBookmarks = false;
-  let settings = loadEpubReadingSettings();
   let bookmarks: EpubBookmark[] = [...document.bookmarks];
   let expandedTocIds = new Set(document.document.toc.map((node) => node.id));
   let currentFragment =
@@ -59,6 +55,14 @@
     document.initialLocator?.spineIndex === spineIndex
       ? document.initialLocator.progressionInChapter
       : 0;
+  let currentCharacterOffset =
+    document.initialLocator?.spineIndex === spineIndex
+      ? document.initialLocator.characterOffset
+      : null;
+  let currentParagraphIndex =
+    document.initialLocator?.spineIndex === spineIndex
+      ? document.initialLocator.paragraphIndex
+      : null;
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let progressStatus: 'idle' | 'saving' | 'saved' | 'failed' = 'idle';
   let query = '';
@@ -74,6 +78,11 @@
   let tocResizeStartX = 0;
   let tocResizeStartWidth = 220;
   let resizingToc = false;
+  let resultsWidth = 280;
+  let resultsResizeStartX = 0;
+  let resultsResizeStartWidth = 280;
+  let resizingResults = false;
+  const restoredFromProgress = document.initialLocator !== null;
 
   $: current = document.document.spine[spineIndex] ?? document.document.spine[0];
   $: chapterUrl = current
@@ -99,6 +108,7 @@
 
   onDestroy(() => {
     endTocResize();
+    endResultsResize();
     if (progressTimer) clearTimeout(progressTimer);
     if (activeSearchId) void cancelEpubSearch(document.documentId, activeSearchId);
   });
@@ -137,13 +147,63 @@
   }
 
   function resizeTocFromKeyboard(event: KeyboardEvent): void {
-    let nextWidth: number | null = null;
-    if (event.key === 'ArrowLeft') nextWidth = tocWidth - 12;
-    if (event.key === 'ArrowRight') nextWidth = tocWidth + 12;
-    if (event.key === 'Home') nextWidth = 160;
-    if (event.key === 'End') nextWidth = maximumTocWidth();
+    const nextWidth = resizedPaneWidthFromKeyboard(
+      'left',
+      tocWidth,
+      event.key,
+      160,
+      maximumTocWidth(),
+    );
     if (nextWidth === null) return;
     tocWidth = Math.round(Math.max(160, Math.min(maximumTocWidth(), nextWidth)));
+    event.preventDefault();
+  }
+
+  function maximumResultsWidth(): number {
+    const bodyWidth = readerBody?.clientWidth || 1000;
+    return Math.max(200, Math.min(520, bodyWidth - tocWidth - 360));
+  }
+
+  function beginResultsResize(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    resultsResizeStartX = event.clientX;
+    resultsResizeStartWidth = resultsWidth;
+    resizingResults = true;
+    window.addEventListener('pointermove', continueResultsResize);
+    window.addEventListener('pointerup', endResultsResize);
+    window.addEventListener('pointercancel', endResultsResize);
+    event.preventDefault();
+  }
+
+  function continueResultsResize(event: PointerEvent): void {
+    if (!resizingResults) return;
+    resultsWidth = resizedPaneWidth(
+      'right',
+      resultsResizeStartWidth,
+      resultsResizeStartX,
+      event.clientX,
+      200,
+      maximumResultsWidth(),
+    );
+  }
+
+  function endResultsResize(): void {
+    resizingResults = false;
+    window.removeEventListener('pointermove', continueResultsResize);
+    window.removeEventListener('pointerup', endResultsResize);
+    window.removeEventListener('pointercancel', endResultsResize);
+  }
+
+  function resizeResultsFromKeyboard(event: KeyboardEvent): void {
+    const nextWidth = resizedPaneWidthFromKeyboard(
+      'right',
+      resultsWidth,
+      event.key,
+      200,
+      maximumResultsWidth(),
+    );
+    if (nextWidth === null) return;
+    resultsWidth = nextWidth;
     event.preventDefault();
   }
 
@@ -194,6 +254,8 @@
     resourceId: string | null,
     fragment: string | null = null,
     progression = 0,
+    characterOffset: number | null = null,
+    paragraphIndex: number | null = null,
   ): void {
     if (!resourceId) return;
     const index = document.document.spine.findIndex((item) => item.resourceId === resourceId);
@@ -201,7 +263,10 @@
     if (index !== spineIndex) void persistProgress();
     currentFragment = fragment;
     currentProgression = progression;
+    currentCharacterOffset = characterOffset;
+    currentParagraphIndex = paragraphIndex;
     if (index === spineIndex) {
+      postReaderState();
       scheduleProgressSave();
       return;
     }
@@ -223,6 +288,8 @@
     if (message.type === 'progress') {
       currentProgression = message.payload.progression;
       currentFragment = message.payload.fragment;
+      currentCharacterOffset = message.payload.characterOffset;
+      currentParagraphIndex = message.payload.paragraphIndex;
       onLocatorChange(currentLocator());
       scheduleProgressSave();
       return;
@@ -243,7 +310,8 @@
       spineHref: current?.resourceId ?? document.document.spine[0]?.resourceId ?? '',
       fragment: currentFragment,
       progressionInChapter: Number.isFinite(currentProgression) ? currentProgression : 0,
-      characterOffset: null,
+      characterOffset: currentCharacterOffset,
+      paragraphIndex: currentParagraphIndex,
     };
   }
 
@@ -276,22 +344,28 @@
       sessionId: document.sessionId,
       token: document.bridgeToken,
     } as const;
-    target.postMessage({ ...identity, type: 'settings', payload: settings }, '*');
+    target.postMessage({
+      ...identity,
+      type: 'settings',
+      payload: {
+        ...readingSettings,
+        fontStack: readingFontStack(readingSettings.fontFamily),
+        hasCustomBackground,
+      },
+    }, '*');
     const locator = currentLocator();
     target.postMessage(
       {
         ...identity,
         type: 'restore',
-        payload: { progression: locator.progressionInChapter },
+        payload: {
+          progression: locator.progressionInChapter,
+          characterOffset: locator.characterOffset,
+          paragraphIndex: locator.paragraphIndex,
+        },
       },
       '*',
     );
-  }
-
-  function updateSettings(patch: Partial<EpubReadingSettings>): void {
-    settings = normalizeEpubReadingSettings({ ...settings, ...patch });
-    persistEpubReadingSettings(settings);
-    postReaderState();
   }
 
   export async function addBookmark(): Promise<void> {
@@ -336,6 +410,8 @@
       bookmark.locator.spineHref,
       bookmark.locator.fragment,
       bookmark.locator.progressionInChapter,
+      bookmark.locator.characterOffset,
+      bookmark.locator.paragraphIndex,
     );
   }
 
@@ -370,7 +446,7 @@
   }
 
   function jumpToSearchResult(result: EpubSearchResult): void {
-    navigateTo(result.spineHref);
+    navigateTo(result.spineHref, null, 0, result.characterOffset, null);
   }
 
   async function copyExternalLink(): Promise<void> {
@@ -392,19 +468,18 @@
   }
 </script>
 
-<section class="epub-reader" aria-label="EPUB 阅读器">
+<section class:has-background={hasCustomBackground} class="epub-reader" aria-label="EPUB 阅读器">
   <header class="reader-toolbar">
     <button aria-label="上一章" disabled={spineIndex <= 0} onclick={() => changeChapter(spineIndex - 1)} type="button">←</button>
     <div class="chapter-heading">
       <strong>{currentTitle}{modifiedSpineIndices.includes(spineIndex) ? ' · 已修改' : ''}</strong>
-      <span>{spineIndex + 1} / {document.document.spine.length} · {Math.round(currentProgression * 100)}%</span>
+      <span>{spineIndex + 1} / {document.document.spine.length} · {Math.round(currentProgression * 100)}%{restoredFromProgress ? ' · 已恢复阅读位置' : ''}</span>
     </div>
     <button aria-label="下一章" disabled={spineIndex >= document.document.spine.length - 1} onclick={() => changeChapter(spineIndex + 1)} type="button">→</button>
     <div class="reader-actions">
       <button onclick={addBookmark} type="button">添加书签</button>
       <button class:active={showBookmarks} onclick={() => (showBookmarks = !showBookmarks)} type="button">书签 {bookmarks.length}</button>
       <button class:active={showSearch} onclick={() => (showSearch = !showSearch)} type="button">搜索</button>
-      <button class:active={showSettings} onclick={() => (showSettings = !showSettings)} type="button">排版</button>
       <button class:active={showMetadata} onclick={() => (showMetadata = !showMetadata)} type="button">书籍信息</button>
     </div>
   </header>
@@ -419,36 +494,15 @@
       <label><input bind:checked={caseSensitive} type="checkbox" /> 区分大小写</label>
       <label><input bind:checked={wholeWord} type="checkbox" /> 全字匹配</label>
       <button disabled={searchStatus === 'searching'} type="submit">{searchStatus === 'searching' ? '搜索中…' : '搜索'}</button>
-      <span>{searchResults.length} 个结果</span>
+      <span>共 {searchResults.length} 条结果</span>
     </form>
-  {/if}
-
-  {#if showSettings}
-    <section aria-label="EPUB 阅读设置" class="settings-panel">
-      <label>字体
-        <select value={settings.fontFamily} onchange={(event) => updateSettings({ fontFamily: event.currentTarget.value as EpubReadingSettings['fontFamily'] })}>
-          <option value="system">系统</option><option value="serif">衬线</option><option value="sans">无衬线</option>
-        </select>
-      </label>
-      <label>字号 <input min="12" max="32" type="range" value={settings.fontSize} oninput={(event) => updateSettings({ fontSize: Number(event.currentTarget.value) })} /><span>{settings.fontSize}px</span></label>
-      <label>行高 <input min="1.2" max="2.4" step="0.1" type="range" value={settings.lineHeight} oninput={(event) => updateSettings({ lineHeight: Number(event.currentTarget.value) })} /><span>{settings.lineHeight}</span></label>
-      <label>内容宽度 <input min="480" max="1200" step="16" type="range" value={settings.contentWidth} oninput={(event) => updateSettings({ contentWidth: Number(event.currentTarget.value) })} /><span>{settings.contentWidth}px</span></label>
-      <label>出版者样式
-        <select value={settings.publisherStyles} onchange={(event) => updateSettings({ publisherStyles: event.currentTarget.value as EpubReadingSettings['publisherStyles'] })}>
-          <option value="use">使用</option><option value="partial">部分覆盖</option><option value="ignore">忽略</option>
-        </select>
-      </label>
-      <label><input checked={settings.ignorePublisherFonts} onchange={(event) => updateSettings({ ignorePublisherFonts: event.currentTarget.checked })} type="checkbox" /> 忽略出版者字体</label>
-      <label><input checked={settings.ignorePublisherColors} onchange={(event) => updateSettings({ ignorePublisherColors: event.currentTarget.checked })} type="checkbox" /> 忽略出版者颜色</label>
-      <label><input checked={settings.allowInternalFonts} onchange={(event) => updateSettings({ allowInternalFonts: event.currentTarget.checked })} type="checkbox" /> 允许内部字体</label>
-    </section>
   {/if}
 
   <div
     bind:this={readerBody}
-    class:resizing-toc={resizingToc}
+    class:resizing-pane={resizingToc || resizingResults}
     class="reader-body"
-    style={`--toc-pane-width:${tocWidth}px`}
+    style={`--toc-pane-width:${tocWidth}px;--results-pane-width:${resultsWidth}px`}
   >
     <aside aria-label="EPUB 目录" class="toc-pane">
       <h2>目录</h2>
@@ -487,6 +541,7 @@
       {#if current}
         {#key chapterUrl}
           <iframe
+            class:transparent={hasCustomBackground}
             allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"
             bind:this={iframe}
             onload={postReaderState}
@@ -501,12 +556,25 @@
     </div>
 
     {#if showSearch}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (ARIA Window Splitter pattern) -->
+      <div
+        aria-label="调整 EPUB 搜索结果宽度"
+        aria-orientation="vertical"
+        aria-valuemax={maximumResultsWidth()}
+        aria-valuemin="200"
+        aria-valuenow={resultsWidth}
+        class="results-resize-grip"
+        onkeydown={resizeResultsFromKeyboard}
+        onpointerdown={beginResultsResize}
+        role="separator"
+        tabindex="0"
+      ></div>
       <aside aria-label="EPUB 搜索结果" class="side-panel results-panel">
-        <h2>搜索结果</h2>
-        {#each searchResults as result}
+        <header><h2>全文搜索</h2><span>共 {searchResults.length} 条结果</span></header>
+        {#each searchResults as result, index}
           <button onclick={() => jumpToSearchResult(result)} type="button">
-            <strong>{result.chapterTitle}</strong>
-            <span>{snippetPart(result, 'before')}<mark>{snippetPart(result, 'match')}</mark>{snippetPart(result, 'after')}</span>
+            <b>{String(index + 1).padStart(2, '0')}</b>
+            <span class="result-copy"><strong>{result.chapterTitle}</strong><span>{snippetPart(result, 'before')}<mark>{snippetPart(result, 'match')}</mark>{snippetPart(result, 'after')}</span></span>
           </button>
         {:else}<p>{searchStatus === 'searching' ? '正在安全提取可见正文…' : '没有搜索结果。'}</p>{/each}
       </aside>
@@ -552,10 +620,10 @@
 {/if}
 
 <style>
-  .epub-reader { display:grid; grid-template-rows:auto auto auto minmax(0,1fr); height:100%; min-height:0; }
+  .epub-reader { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; }
   .reader-toolbar { align-items:center; background:var(--surface-chrome); border-bottom:1px solid var(--border-subtle); display:flex; gap:8px; min-height:45px; padding:6px 10px; }
-  button, select, input { font:500 11px/1 var(--font-ui); }
-  button, select { background:var(--surface-control); border:1px solid var(--border-strong); border-radius:var(--radius-sm); color:var(--text-secondary); min-height:30px; padding:0 10px; }
+  button, input { font:500 11px/1 var(--font-ui); }
+  button { background:var(--surface-control); border:1px solid var(--border-strong); border-radius:var(--radius-sm); color:var(--text-secondary); min-height:30px; padding:0 10px; }
   button:hover:not(:disabled), button.active { background:var(--surface-hover); color:var(--text-primary); }
   button:disabled { color:var(--text-disabled); }
   .chapter-heading { display:grid; min-width:100px; }
@@ -564,18 +632,21 @@
   .modified-dot { background:var(--accent,#4b78ff); border-radius:50%; display:inline-block; flex:0 0 auto; height:6px; margin-left:auto; width:6px; }
   .reader-actions { display:flex; gap:5px; margin-left:auto; }
   .layout-warning { background:var(--warning-soft,#fff5d6); border-bottom:1px solid var(--warning); color:var(--text-secondary); font:500 11px/1.4 var(--font-ui); padding:8px 12px; }
-  .search-panel, .settings-panel { align-items:center; background:var(--surface-pane); border-bottom:1px solid var(--border-subtle); display:flex; flex-wrap:wrap; gap:12px; padding:8px 12px; }
+  .search-panel { align-items:center; background:var(--surface-pane); border-bottom:1px solid var(--border-subtle); display:flex; flex-wrap:wrap; gap:12px; padding:8px 12px; }
   .search-panel > input { background:var(--surface-control); border:1px solid var(--border-strong); border-radius:var(--radius-sm); color:var(--text-primary); min-height:30px; padding:0 9px; width:min(330px,35vw); }
-  .search-panel label, .settings-panel label, .search-panel span { align-items:center; color:var(--text-secondary); display:flex; font:500 10px/1 var(--font-ui); gap:5px; }
-  .settings-panel input[type='range'] { width:90px; }
-  .reader-body { display:flex; min-height:0; }
-  .reader-body.resizing-toc { cursor:col-resize; user-select:none; }
+  .search-panel label, .search-panel span { align-items:center; color:var(--text-secondary); display:flex; font:500 10px/1 var(--font-ui); gap:5px; }
+  .reader-body { display:flex; flex:1 1 auto; min-height:0; }
+  .reader-body.resizing-pane { cursor:col-resize; user-select:none; }
   .toc-pane, .side-panel { background:var(--surface-pane); flex:0 0 220px; overflow:auto; padding:16px 10px; }
   .toc-pane { flex-basis:var(--toc-pane-width); }
   .toc-resize-grip { background:var(--surface-chrome); cursor:col-resize; flex:0 0 8px; outline:none; position:relative; }
   .toc-resize-grip::after { background:transparent; content:''; inset:0 3px; position:absolute; transition:background var(--motion-fast); }
-  .toc-resize-grip:hover::after, .toc-resize-grip:focus-visible::after, .resizing-toc .toc-resize-grip::after { background:var(--accent); }
+  .toc-resize-grip:hover::after, .toc-resize-grip:focus-visible::after, .resizing-pane .toc-resize-grip::after { background:var(--accent); }
+  .results-resize-grip { background:var(--surface-chrome); cursor:col-resize; flex:0 0 8px; outline:none; position:relative; }
+  .results-resize-grip::after { background:transparent; content:''; inset:0 3px; position:absolute; transition:background var(--motion-fast); }
+  .results-resize-grip:hover::after, .results-resize-grip:focus-visible::after, .resizing-pane .results-resize-grip::after { background:var(--accent); }
   .side-panel { border-left:1px solid var(--border-subtle); flex-basis:260px; padding-inline:12px; }
+  .results-panel { flex-basis:var(--results-pane-width); }
   h2 { color:var(--text-primary); font:650 12px/1.3 var(--font-ui); margin:0 8px 12px; }
   nav { display:grid; gap:2px; }
   .toc-row { align-items:center; display:flex; padding-left:calc(var(--toc-depth) * 12px); }
@@ -586,11 +657,19 @@
   .toc-link.active { background:var(--accent-soft); color:var(--accent-strong); }
   .toc-pane p, .side-panel p, dd, dt { color:var(--text-tertiary); font:400 11px/1.5 var(--font-ui); }
   .viewport-shell { background:var(--surface-canvas); flex:1; min-width:0; padding:12px; position:relative; }
+  .has-background .viewport-shell { background:color-mix(in srgb,var(--surface-canvas) 78%,transparent); }
   iframe { background:white; border:1px solid var(--border-subtle); border-radius:var(--radius-sm); height:100%; width:100%; }
+  iframe.transparent { background:transparent; }
   .progress-save { bottom:16px; position:absolute; right:20px; }
-  .results-panel > button, .bookmarks-panel article > button { background:transparent; border:0; display:grid; gap:5px; height:auto; padding:8px; text-align:left; width:100%; }
+  .results-panel > header { align-items:baseline; display:flex; justify-content:space-between; padding:0 8px 9px; }
+  .results-panel > header h2 { margin:0; }
+  .results-panel > header span { color:var(--text-tertiary); font:600 9px/1 var(--font-ui); }
+  .results-panel > button, .bookmarks-panel article > button { background:transparent; border:0; display:grid; gap:8px; height:auto; padding:10px 8px; text-align:left; width:100%; }
+  .results-panel > button { border-bottom:1px solid var(--border-subtle); grid-template-columns:26px minmax(0,1fr); }
+  .results-panel > button > b { color:var(--text-disabled); font:650 9px/1.3 var(--font-mono); }
+  .result-copy { display:grid; gap:5px; min-width:0; }
   .results-panel strong, .bookmarks-panel strong { color:var(--text-primary); font:650 10px/1.3 var(--font-ui); }
-  .results-panel span, .bookmarks-panel span { color:var(--text-tertiary); font:400 10px/1.45 var(--font-ui); white-space:normal; }
+  .results-panel .result-copy > span, .bookmarks-panel span { color:var(--text-tertiary); display:-webkit-box; font:400 10px/1.45 var(--font-ui); line-clamp:2; overflow:hidden; overflow-wrap:anywhere; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
   mark { background:var(--warning-soft,#fff5d6); color:var(--text-primary); }
   .bookmarks-panel article { border-bottom:1px solid var(--border-subtle); padding-bottom:5px; }
   .bookmarks-panel article.invalid { opacity:.55; }
@@ -608,5 +687,5 @@
   dl div { display:grid; gap:3px; }
   dd { color:var(--text-secondary); margin:0; overflow-wrap:anywhere; }
   @media (max-width:950px) { .reader-actions button { padding-inline:7px; } .side-panel { flex-basis:220px; } }
-  @media (max-width:760px) { .toc-pane, .toc-resize-grip { display:none; } .reader-actions button:nth-child(n+4) { display:none; } }
+  @media (max-width:760px) { .toc-pane, .toc-resize-grip, .results-resize-grip { display:none; } .reader-actions button:nth-child(n+4) { display:none; } .results-panel { flex-basis:220px; } }
 </style>

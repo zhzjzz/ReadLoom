@@ -1,10 +1,13 @@
 <script lang="ts">
   import type { DocumentSession, SaveOptions, TextEncoding } from '../types/document';
+  import { defaultShortcutSettings } from '../stores/appSettings';
+  import type { ShortcutActionId, ShortcutSettings } from '../types/settings';
 
   export let document: DocumentSession | null;
   export let saving = false;
   export let editing = false;
   export let desktopRuntime = true;
+  export let shortcuts: ShortcutSettings = defaultShortcutSettings;
   export let onOpen: () => void;
   export let onToggleEditing: () => void;
   export let onSave: () => void;
@@ -46,29 +49,33 @@
       lineEnding: (event.currentTarget as HTMLSelectElement).value as SaveOptions['lineEnding'],
     });
   }
+
+  function actionTitle(label: string, action: ShortcutActionId): string {
+    return shortcuts[action] ? `${label}（${shortcuts[action]}）` : label;
+  }
 </script>
 
 <nav aria-label="文本文件操作" class="editor-toolbar">
   <div class="action-group">
-    <button disabled={!desktopRuntime || saving} onclick={onOpen} title="打开文件（Ctrl+O）" type="button">
+    <button disabled={!desktopRuntime || saving} onclick={onOpen} title={actionTitle('打开文件', 'open')} type="button">
       打开
     </button>
     <button
       class:editing
       disabled={!document || saving}
       onclick={onToggleEditing}
-      title={editing ? '退出编辑' : '开始编辑'}
+      title={actionTitle(editing ? '退出编辑' : '开始编辑', 'toggleEdit')}
       type="button"
     >
       {editing ? '退出编辑' : '开始编辑'}
     </button>
-    <button disabled={!document || !editing || saving || document.readOnly} onclick={onSave} title="保存（Ctrl+S）" type="button">
+    <button disabled={!document || !editing || saving || document.readOnly} onclick={onSave} title={actionTitle('保存', 'save')} type="button">
       {saving ? '保存中…' : '保存'}
     </button>
-    <button disabled={!document || !editing || saving || !desktopRuntime} onclick={onSaveAs} title="另存为（Ctrl+Shift+S）" type="button">
+    <button disabled={!document || !editing || saving || !desktopRuntime} onclick={onSaveAs} title={actionTitle('另存为', 'saveAs')} type="button">
       另存为
     </button>
-    <button disabled={!document || saving} onclick={onClose} title="关闭（Ctrl+W）" type="button">
+    <button disabled={!document || saving} onclick={onClose} title={actionTitle('关闭', 'close')} type="button">
       关闭
     </button>
   </div>

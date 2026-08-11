@@ -106,4 +106,18 @@ describe('TextEditor', () => {
     expect(editorView?.state.selection.main.head).toBe(3);
     expect(handle!.getCursorOffset()).toBe(3);
   });
+
+  it('keeps large TXT reading DOM bounded while preserving the visible beginning', async () => {
+    const content = Array.from(
+      { length: 2_000 },
+      (_, index) => `第 ${index + 1} 段用于验证大文本窗口化渲染。`,
+    ).join('\n\n');
+    const { container } = render(TextEditor, { initialContent: content });
+
+    await waitFor(() => expect(container.querySelector('.cm-editor')).not.toBeNull());
+    const renderedBlocks = container.querySelectorAll('.text-reading-surface [data-source-start]');
+    expect(renderedBlocks.length).toBeGreaterThan(0);
+    expect(renderedBlocks.length).toBeLessThanOrEqual(800);
+    expect(container.querySelector('.text-reading-surface')?.textContent).toContain('第 1 段');
+  });
 });

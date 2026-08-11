@@ -98,12 +98,23 @@ pub(crate) fn open_epub_document(
         )
         .unwrap_or_default();
     let author = opened.document.metadata.creators.join("、");
-    let _ = local_state.record_recent(RecentDocumentRecord {
+    let cover_resource_id = opened.document.cover_resource_id.as_deref();
+    let cover_media_type = cover_resource_id.and_then(|resource_id| {
+        opened
+            .document
+            .manifest
+            .iter()
+            .find(|item| item.resource_id == resource_id)
+            .map(|item| item.media_type.as_str())
+    });
+    let _ = local_state.record_document_opened(RecentDocumentRecord {
         path: &context.path,
         document_kind: "epub",
         display_title: &opened.document.metadata.title,
         author: (!author.is_empty()).then_some(author.as_str()),
         fingerprint: Some(&context.file_fingerprint),
+        cover_resource_id,
+        cover_media_type,
     });
     Ok(opened)
 }

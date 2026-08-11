@@ -85,6 +85,14 @@ pub struct DeleteTextBookmarkRequest {
     bookmark_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTextProgressRequest {
+    document_id: String,
+    character_offset: usize,
+    line_number: usize,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenedTextDocumentDto {
@@ -99,6 +107,7 @@ pub struct OpenedTextDocumentDto {
     read_only: bool,
     revision: u64,
     bookmarks: Vec<TextBookmark>,
+    initial_character_offset: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,15 +136,24 @@ pub fn open_text_document(
         encoding_override: request.encoding_override,
         allow_large: request.allow_large,
     })?;
-    let _ = local_state.record_recent(RecentDocumentRecord {
+    let _ = local_state.record_document_opened(RecentDocumentRecord {
         path: &opened.path,
         document_kind: "txt",
         display_title: &opened.file_name,
         author: None,
         fingerprint: None,
+        cover_resource_id: None,
+        cover_media_type: None,
     });
     let bookmarks = local_state.text_bookmarks(&opened.path)?;
-    Ok(OpenedTextDocumentDto::from((opened, bookmarks)))
+    let initial_character_offset = local_state
+        .load_text_progress(&opened.path, opened.content.len())?
+        .unwrap_or_default();
+    Ok(OpenedTextDocumentDto::from((
+        opened,
+        bookmarks,
+        initial_character_offset,
+    )))
 }
 
 #[tauri::command]
@@ -147,7 +165,32 @@ pub fn reopen_text_document(
     let document_id = validated_document_id(request.document_id)?;
     let opened = state.reopen(&document_id, request.encoding, request.allow_large)?;
     let bookmarks = local_state.text_bookmarks(&opened.path)?;
-    Ok(OpenedTextDocumentDto::from((opened, bookmarks)))
+    let initial_character_offset = local_state
+        .load_text_progress(&opened.path, opened.content.len())?
+        .unwrap_or_default();
+    Ok(OpenedTextDocumentDto::from((
+        opened,
+        bookmarks,
+        initial_character_offset,
+    )))
+}
+
+#[tauri::command]
+pub fn save_text_progress(
+    state: State<'_, TextDocumentService>,
+    local_state: State<'_, LocalStateStore>,
+    request: SaveTextProgressRequest,
+) -> Result<(), AppError> {
+    let document_id = validated_document_id(request.document_id)?;
+    if request.line_number == 0 || request.character_offset > u32::MAX as usize {
+        return Err(AppError::validation(
+            "INVALID_TEXT_PROGRESS",
+            "TXT 阅读位置无效。",
+            "继续阅读后再试。",
+        ));
+    }
+    let path = state.document_path(&document_id)?;
+    local_state.save_text_progress(&path, request.character_offset, request.line_number)
 }
 
 #[tauri::command]
@@ -281,8 +324,14 @@ fn validated_document_id(document_id: String) -> Result<DocumentId, AppError> {
     Ok(DocumentId(document_id))
 }
 
-impl From<(OpenedTextDocument, Vec<TextBookmark>)> for OpenedTextDocumentDto {
-    fn from((document, bookmarks): (OpenedTextDocument, Vec<TextBookmark>)) -> Self {
+impl From<(OpenedTextDocument, Vec<TextBookmark>, usize)> for OpenedTextDocumentDto {
+    fn from(
+        (document, bookmarks, initial_character_offset): (
+            OpenedTextDocument,
+            Vec<TextBookmark>,
+            usize,
+        ),
+    ) -> Self {
         Self {
             document_id: document.document_id.0,
             file_name: document.file_name,
@@ -295,6 +344,7 @@ impl From<(OpenedTextDocument, Vec<TextBookmark>)> for OpenedTextDocumentDto {
             read_only: document.read_only,
             revision: document.revision,
             bookmarks,
+            initial_character_offset,
         }
     }
 }

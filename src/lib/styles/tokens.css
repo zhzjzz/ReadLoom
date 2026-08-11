@@ -8,7 +8,11 @@
   --left-pane-width: 220px;
   --right-pane-width: 286px;
 
-  --radius-sm: 5px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-sm: 0 8px 28px rgb(20 31 53 / 8%);
+  --shadow-md: 0 18px 54px rgb(20 31 53 / 13%);
   --motion-fast: 120ms;
 }
 
@@ -24,4 +28,3 @@
     --motion-fast: 0ms;
   }
 }
-

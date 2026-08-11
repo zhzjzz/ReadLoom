@@ -27,6 +27,8 @@ body {
 }
 
 button,
+input,
+select,
 textarea {
   font-family: inherit;
 }
@@ -41,6 +43,8 @@ button {
 }
 
 button:focus-visible,
+input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -74,4 +78,3 @@ textarea,
     transition-duration: 0.01ms !important;
   }
 }
-

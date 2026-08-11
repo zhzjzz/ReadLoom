@@ -479,15 +479,139 @@ fn mime_mismatch() -> AppError {
 }
 
 fn wrap_xhtml(fragment: &str, bridge_script: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html{{color-scheme:light dark}}body{{box-sizing:border-box;margin:0 auto;max-width:var(--r-width,52rem);padding:var(--r-margin,48px);font-family:var(--r-font,system-ui,sans-serif);font-size:var(--r-size,18px);line-height:var(--r-line,1.8);text-align:var(--r-align,start);overflow-wrap:anywhere}}img,svg{{height:auto;max-width:var(--r-image,100%)}}a{{color:#2855b8}}@media(prefers-color-scheme:dark){{body{{background:#17191d;color:#e7e9ee}}a{{color:#9db8ff}}}}</style></head><body>{fragment}<script>{bridge_script}</script></body></html>"
-    )
+    const TEMPLATE: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style id="readloom-base">
+html{color-scheme:light dark;background:#fff}
+body{box-sizing:border-box;margin:0 auto;max-width:var(--r-width,780px);padding:var(--r-vertical,30px) var(--r-horizontal,40px);font-family:var(--r-font,system-ui,sans-serif);font-size:var(--r-size,19px);font-weight:var(--r-weight,400);letter-spacing:var(--r-tracking,0);line-height:var(--r-line,1.7);text-align:var(--r-align,justify);overflow-wrap:anywhere}
+h1,h2,h3,h4,h5,h6{column-span:all;text-indent:0}
+img,svg{height:auto;max-width:100%}
+body>:has(>img:only-child):has(+:is(h1,h2,h3,h4,h5,h6))>img:only-child{display:block;height:auto!important;margin-inline:auto;max-height:min(24vh,160px);max-width:100%!important;object-fit:contain;width:auto!important}
+pre,code,kbd,samp{font-family:ui-monospace,monospace;white-space:pre-wrap}
+sup,sub{font-size:.75em;line-height:0}
+a{color:#2855b8}
+@media(prefers-color-scheme:dark){html{background:#17191d}body{color:#e7e9ee}a{color:#9db8ff}}
+</style></head><body>__READLOOM_FRAGMENT__<script>__READLOOM_BRIDGE__</script></body></html>"#;
+    TEMPLATE
+        .replace("__READLOOM_BRIDGE__", bridge_script)
+        .replace("__READLOOM_FRAGMENT__", fragment)
 }
 
 fn bridge_script(document_id: &str, session_id: &str, token: &str) -> String {
-    format!(
-        r#"(()=>{{"use strict";const c={{documentId:"{document_id}",sessionId:"{session_id}",token:"{token}"}};let last=0;const send=(type,payload)=>parent.postMessage({{source:"readloom-epub",version:1,type,...c,payload}},"*");const progress=()=>{{const now=Date.now();if(now-last<400)return;last=now;const root=document.documentElement;const span=Math.max(1,root.scrollHeight-innerHeight);send("progress",{{progression:Math.max(0,Math.min(1,scrollY/span)),fragment:location.hash.slice(1,257)||null}})}};const finite=(value,min,max,fallback)=>typeof value==="number"&&Number.isFinite(value)?Math.max(min,Math.min(max,value)):fallback;addEventListener("message",event=>{{const data=event.data;if(!data||data.source!=="readloom-host"||data.version!==1||data.documentId!==c.documentId||data.sessionId!==c.sessionId||data.token!==c.token)return;if(data.type==="restore"){{const value=finite(data.payload?.progression,0,1,0);requestAnimationFrame(()=>scrollTo(0,value*Math.max(0,document.documentElement.scrollHeight-innerHeight)));return}}if(data.type!=="settings")return;const p=data.payload||{{}};const root=document.documentElement;const family=p.fontFamily==="serif"?"Georgia,'Noto Serif SC',serif":p.fontFamily==="sans"?"system-ui,'Microsoft YaHei UI',sans-serif":"system-ui,'Microsoft YaHei UI',sans-serif";root.style.setProperty("--r-font",family);root.style.setProperty("--r-size",finite(p.fontSize,12,32,18)+"px");root.style.setProperty("--r-line",finite(p.lineHeight,1.2,2.4,1.8));root.style.setProperty("--r-width",finite(p.contentWidth,480,1200,832)+"px");root.style.setProperty("--r-margin",finite(p.pageMargin,8,96,48)+"px");root.style.setProperty("--r-image",finite(p.imageMaximumWidth,50,100,100)+"%");root.style.setProperty("--r-align",p.textAlign==="justify"?"justify":"start");const override=document.getElementById("readloom-overrides")||document.head.appendChild(Object.assign(document.createElement("style"),{{id:"readloom-overrides"}}));override.textContent=(p.publisherStyles==="ignore"?"link[rel~='stylesheet']{{display:none}}":"")+(p.ignorePublisherFonts||!p.allowInternalFonts?"*{{font-family:var(--r-font)!important}}":"")+(p.ignorePublisherColors?"body,*{{color:inherit!important;background-color:transparent!important}}":"")}});addEventListener("scroll",progress,{{passive:true}});addEventListener("load",progress);document.addEventListener("click",event=>{{const target=event.target;const anchor=target instanceof Element?target.closest("a[href]"):null;if(!anchor)return;const href=anchor.getAttribute("href");if(!href||href.length>2048)return;event.preventDefault();send("link",{{href}})}})}})();"#
-    )
+    const TEMPLATE: &str = r#"(()=>{
+"use strict";
+const c={documentId:"__DOCUMENT_ID__",sessionId:"__SESSION_ID__",token:"__TOKEN__"};
+let last=0;
+const send=(type,payload)=>parent.postMessage({source:"readloom-epub",version:1,type,...c,payload},"*");
+const finite=(value,min,max,fallback)=>typeof value==="number"&&Number.isFinite(value)?Math.max(min,Math.min(max,value)):fallback;
+const paragraphElements=()=>Array.from(document.querySelectorAll("p,li,blockquote,pre,dd,dt"));
+const textLocation=()=>{
+  const paragraphs=paragraphElements();
+  const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+  let characterOffset=0;
+  for(let node=walker.nextNode();node;node=walker.nextNode()){
+    const length=node.textContent?.length||0;
+    if(length){
+      const range=document.createRange();range.selectNodeContents(node);
+      const rect=range.getBoundingClientRect();
+      if(rect.bottom>=8&&rect.top<=innerHeight){
+        const parent=node.parentElement?.closest("p,li,blockquote,pre,dd,dt")||null;
+        const paragraphIndex=parent?paragraphs.indexOf(parent):null;
+        return {characterOffset,paragraphIndex:paragraphIndex>=0?paragraphIndex:null};
+      }
+    }
+    characterOffset+=length;
+  }
+  return {characterOffset:null,paragraphIndex:null};
+};
+const progress=()=>{
+  const now=Date.now();if(now-last<400)return;last=now;
+  const root=document.documentElement;
+  const span=Math.max(1,root.scrollHeight-innerHeight);
+  const textPosition=textLocation();
+  send("progress",{progression:Math.max(0,Math.min(1,scrollY/span)),fragment:globalThis.location.hash.slice(1,257)||null,...textPosition});
+};
+const restoreTextLocation=payload=>{
+  const requested=Number.isInteger(payload?.characterOffset)&&payload.characterOffset>=0?payload.characterOffset:null;
+  if(requested!==null){
+    const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+    let offset=0;
+    for(let node=walker.nextNode();node;node=walker.nextNode()){
+      const length=node.textContent?.length||0;
+      if(requested<=offset+length){
+        const range=document.createRange();
+        range.setStart(node,Math.min(length,Math.max(0,requested-offset)));range.collapse(true);
+        const target=node.parentElement;target?.scrollIntoView({block:"start"});
+        requestAnimationFrame(()=>scrollBy(0,-finite(payload?.verticalMargin,8,120,30)));
+        return true;
+      }
+      offset+=length;
+    }
+  }
+  const paragraphIndex=Number.isInteger(payload?.paragraphIndex)?payload.paragraphIndex:null;
+  const paragraph=paragraphIndex===null?null:paragraphElements()[paragraphIndex];
+  if(paragraph){paragraph.scrollIntoView({block:"start"});return true}
+  return false;
+};
+const setPublisherStyles=enabled=>{
+  document.querySelectorAll("link[rel~='stylesheet'],style").forEach(node=>{
+    if(node.id==="readloom-base"||node.id==="readloom-overrides")return;
+    if(node.sheet)node.sheet.disabled=!enabled;
+  });
+};
+const applySettings=p=>{
+  const root=document.documentElement;
+  const columns=p.columns===2?2:1;
+  const contentWidth=finite(p.contentWidth,480,1280,780);
+  root.style.setProperty("--r-font",typeof p.fontStack==="string"?p.fontStack:"system-ui,'Microsoft YaHei UI',sans-serif");
+  root.style.setProperty("--r-size",finite(p.fontSize,12,36,19)+"px");
+  root.style.setProperty("--r-weight",finite(p.fontWeight,300,700,400));
+  root.style.setProperty("--r-tracking",finite(p.letterSpacing,-.05,.3,0)+"em");
+  root.style.setProperty("--r-line",finite(p.lineHeight,1.2,2.4,1.7));
+  root.style.setProperty("--r-indent",finite(p.firstLineIndent,0,4,2)+"em");
+  root.style.setProperty("--r-paragraph",finite(p.paragraphSpacing,0,1.5,.15)+"em");
+  root.style.setProperty("--r-width",(columns===2?contentWidth*2+56:contentWidth)+"px");
+  root.style.setProperty("--r-horizontal",finite(p.horizontalMargin,8,160,40)+"px");
+  root.style.setProperty("--r-vertical",finite(p.verticalMargin,8,120,30)+"px");
+  root.style.setProperty("--r-align",p.textAlign==="justify"?"justify":"start");
+  const epub=p.epub||{};
+  setPublisherStyles(epub.usePublisherStyles!==false);
+  const prose="body>p,body>section>p,body>article>p,body>div>p";
+  const rules=[];
+  if(p.hasCustomBackground)rules.push("html,body{background-color:transparent!important;background-image:none!important}");
+  rules.push("html,body{height:auto!important;min-height:100%}body{column-count:"+(columns===2?2:"auto")+"!important;column-gap:56px!important;text-align:var(--r-align)}h1,h2,h3,h4,h5,h6{column-span:all!important;text-indent:0!important}");
+  if(epub.overrideFont||epub.useEmbeddedFonts===false)rules.push("body{font-family:var(--r-font)!important;font-weight:var(--r-weight)!important;letter-spacing:var(--r-tracking)!important}"+prose+"{font-family:inherit!important}");
+  if(epub.overrideFontSize)rules.push("body{font-size:var(--r-size)!important}");
+  if(epub.overrideLineHeight)rules.push("body,"+prose+"{line-height:var(--r-line)!important}");
+  if(epub.overrideIndent)rules.push(prose+"{text-indent:var(--r-indent)!important}");
+  if(epub.overrideParagraphSpacing)rules.push(prose+"{margin-block-start:0!important;margin-block-end:var(--r-paragraph)!important}");
+  const override=document.getElementById("readloom-overrides")||document.head.appendChild(Object.assign(document.createElement("style"),{id:"readloom-overrides"}));
+  override.textContent=rules.join("");
+};
+addEventListener("message",event=>{
+  const data=event.data;
+  if(!data||data.source!=="readloom-host"||data.version!==1||data.documentId!==c.documentId||data.sessionId!==c.sessionId||data.token!==c.token)return;
+  if(data.type==="restore"){
+    const payload=data.payload||{};
+    requestAnimationFrame(()=>{if(!restoreTextLocation(payload)){const value=finite(payload.progression,0,1,0);scrollTo(0,value*Math.max(0,document.documentElement.scrollHeight-innerHeight))}});
+    return;
+  }
+  if(data.type==="settings")applySettings(data.payload||{});
+});
+addEventListener("scroll",progress,{passive:true});
+addEventListener("load",progress);
+document.addEventListener("click",event=>{
+  const target=event.target;
+  const anchor=target instanceof Element?target.closest("a[href]"):null;
+  if(!anchor)return;
+  const href=anchor.getAttribute("href");if(!href||href.length>2048)return;
+  event.preventDefault();send("link",{href});
+});
+})();"#;
+    TEMPLATE
+        .replace("__DOCUMENT_ID__", document_id)
+        .replace("__SESSION_ID__", session_id)
+        .replace("__TOKEN__", token)
 }
 
 fn epub_csp(script: &str) -> String {
@@ -605,6 +729,10 @@ mod tests {
         let body = String::from_utf8(resource.body).unwrap();
         assert!(body.contains("你好，Readloom。"));
         assert!(body.contains("source:\"readloom-epub\""));
+        assert!(body.contains("paragraphIndex"));
+        assert!(body.contains("html,body{background-color:transparent!important"));
+        assert!(!body.contains("*{font-family"));
+        assert!(!body.contains("body,*"));
         let csp = resource.content_security_policy.expect("chapter CSP");
         assert!(csp.contains("script-src 'sha256-"));
         assert!(!csp.contains("'unsafe-eval'"));
@@ -617,6 +745,23 @@ mod tests {
             .resource(&opened.session_id, "EPUB/chapter.xhtml")
             .expect_err("closed session resource must expire");
         assert_eq!(error.to_dto().code, "EPUB_SESSION_EXPIRED");
+    }
+
+    #[test]
+    fn wrapped_chapters_constrain_only_leading_decorative_header_images() {
+        let bridge = bridge_script("document", "session", "token");
+        let body = wrap_xhtml(
+            r#"<div class="ym"><img src="header.png"></div><h2>章节标题</h2><p>正文</p><p><img src="illustration.png"></p>"#,
+            &bridge,
+        );
+
+        assert!(
+            body.contains("body>:has(>img:only-child):has(+:is(h1,h2,h3,h4,h5,h6))>img:only-child")
+        );
+        assert!(body.contains("max-height:min(24vh,160px)"));
+        assert!(body.contains("html,body{height:auto!important;min-height:100%}"));
+        assert!(body.contains("columns===2?2:\"auto\""));
+        assert!(!body.contains("img{max-height:min(24vh,160px)"));
     }
 
     #[test]

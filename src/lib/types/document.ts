@@ -17,6 +17,7 @@ export interface OpenedTextDocumentDto {
   readOnly: boolean;
   revision: number;
   bookmarks: TextBookmark[];
+  initialCharacterOffset: number;
 }
 
 export interface TextBookmark {
@@ -29,7 +30,7 @@ export interface TextBookmark {
   updatedAtMs: number;
 }
 
-export interface SavedTextDocumentDto extends Omit<OpenedTextDocumentDto, 'content' | 'bookmarks'> {}
+export interface SavedTextDocumentDto extends Omit<OpenedTextDocumentDto, 'content' | 'bookmarks' | 'initialCharacterOffset'> {}
 
 export interface DocumentSession {
   documentId: string;
@@ -65,8 +66,9 @@ export interface TextEditorHandle {
   focus(): void;
   getContent(): string;
   getCursorOffset(): number;
+  getReadingOffset(): number;
   markSaved(): void;
-  revealOffset(offset: number): void;
+  revealOffset(offset: number, focus?: boolean): void;
   setEditing(editing: boolean): void;
 }
 

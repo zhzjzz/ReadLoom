@@ -1,14 +1,14 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { OpenedEpubDocumentDto } from '../../types/epub';
+import type { EpubSearchRequest, EpubSearchResult, OpenedEpubDocumentDto } from '../../types/epub';
 import EpubReader from './EpubReader.svelte';
 
 const serviceMocks = vi.hoisted(() => ({
   saveProgress: vi.fn(async (locator) => locator),
   saveBookmark: vi.fn(),
   deleteBookmark: vi.fn(),
-  search: vi.fn(async () => []),
+  search: vi.fn<(request: EpubSearchRequest) => Promise<EpubSearchResult[]>>(async () => []),
   cancel: vi.fn(async () => {}),
 }));
 
@@ -135,6 +135,48 @@ describe('EpubReader', () => {
     expect(separator.getAttribute('aria-valuenow')).toBe('312');
   });
 
+  it('numbers search results, reports the total, and resizes the result pane', async () => {
+    const onSpineChange = vi.fn();
+    serviceMocks.search.mockResolvedValueOnce([
+      {
+        requestId: 'search-result',
+        spineIndex: 0,
+        spineHref: 'EPUB/one.xhtml',
+        chapterTitle: '第一章',
+        characterOffset: 8,
+        temporarySnippet: '开头目标正文',
+        matchStart: 2,
+        matchEnd: 4,
+      },
+      {
+        requestId: 'search-result',
+        spineIndex: 1,
+        spineHref: 'EPUB/two.xhtml',
+        chapterTitle: '第二章',
+        characterOffset: 16,
+        temporarySnippet: '另一处目标正文',
+        matchStart: 3,
+        matchEnd: 5,
+      },
+    ]);
+    render(EpubReader, { document, spineIndex: 0, onSpineChange });
+
+    await fireEvent.click(screen.getByRole('button', { name: '搜索' }));
+    await fireEvent.input(screen.getByLabelText('书内搜索'), { target: { value: '目标' } });
+    await fireEvent.click(screen.getAllByRole('button', { name: '搜索' }).at(-1)!);
+
+    expect((await screen.findAllByText('共 2 条结果')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('01', { selector: '.results-panel b' })).toBeTruthy();
+    expect(screen.getByText('02', { selector: '.results-panel b' })).toBeTruthy();
+    const separator = screen.getByRole('separator', { name: '调整 EPUB 搜索结果宽度' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('280');
+    await fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('292');
+
+    await fireEvent.click(screen.getByRole('button', { name: /02.*第二章.*另一处目标正文/ }));
+    expect(onSpineChange).toHaveBeenCalledWith(1);
+  });
+
   it('shows an explicit compatibility warning for fixed-layout publications', () => {
     render(EpubReader, {
       document: { ...document, document: { ...document.document, layout: 'fixed' } },
@@ -143,6 +185,28 @@ describe('EpubReader', () => {
     });
 
     expect(screen.getByText(/固定布局 EPUB/)).toBeTruthy();
+  });
+
+  it('shows when a persisted EPUB chapter position has been restored', () => {
+    render(EpubReader, {
+      document: {
+        ...document,
+        initialLocator: {
+          documentId: document.documentId,
+          documentFingerprint: document.fileFingerprint,
+          spineIndex: 1,
+          spineHref: 'EPUB/two.xhtml',
+          fragment: null,
+          progressionInChapter: 0.42,
+          characterOffset: null,
+          paragraphIndex: null,
+        },
+      },
+      spineIndex: 1,
+      onSpineChange: vi.fn(),
+    });
+
+    expect(screen.getByText(/42% · 已恢复阅读位置/)).toBeTruthy();
   });
 
   it('marks modified chapters in both the heading and table of contents', () => {

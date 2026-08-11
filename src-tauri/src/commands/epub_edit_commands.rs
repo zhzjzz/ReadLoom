@@ -287,12 +287,23 @@ pub(crate) async fn save_epub_as(
     .await
     .map_err(|_| AppError::internal("REPACK_FAILED", "join EPUB save worker"))??;
     let author = saved.document.metadata.creators.join("、");
-    let _ = local_state.record_recent(RecentDocumentRecord {
+    let cover_resource_id = saved.document.cover_resource_id.as_deref();
+    let cover_media_type = cover_resource_id.and_then(|resource_id| {
+        saved
+            .document
+            .manifest
+            .iter()
+            .find(|item| item.resource_id == resource_id)
+            .map(|item| item.media_type.as_str())
+    });
+    let _ = local_state.record_document_opened(RecentDocumentRecord {
         path: &PathBuf::from(&saved.target_path),
         document_kind: "epub",
         display_title: &saved.document.metadata.title,
         author: (!author.is_empty()).then_some(author.as_str()),
         fingerprint: Some(&saved.file_fingerprint),
+        cover_resource_id,
+        cover_media_type,
     });
     Ok(saved)
 }

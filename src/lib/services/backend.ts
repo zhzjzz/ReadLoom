@@ -24,16 +24,19 @@ export async function probeBackend(message: string): Promise<SystemProbeDto> {
     clientTimestampMs: Date.now(),
   };
 
-  try {
-    return await invoke<SystemProbeDto>('system_probe', { request });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('system_probe', { request });
 }
 
 export async function reportFrontendReady(): Promise<StartupMetricsDto> {
+  return invokeChecked('frontend_ready');
+}
+
+export async function invokeChecked<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
-    return await invoke<StartupMetricsDto>('frontend_ready');
+    return await invoke<T>(command, args);
   } catch (error) {
     throw normalizeAppError(error);
   }
@@ -61,4 +64,3 @@ export function normalizeAppError(error: unknown): AppErrorDto {
       typeof candidate.suggestedAction === 'string' ? candidate.suggestedAction : null,
   };
 }
-

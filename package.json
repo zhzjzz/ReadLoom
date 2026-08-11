@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
+    "build:exe": "tauri build --no-bundle --features custom-protocol && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1",
     "preview": "vite preview --host 127.0.0.1 --port 1421",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "verify:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

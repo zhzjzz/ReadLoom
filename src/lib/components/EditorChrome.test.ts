@@ -49,7 +49,7 @@ describe('editor chrome', () => {
       onOptionsChange,
     });
 
-    await fireEvent.click(screen.getByTitle('保存（Ctrl+S）'));
+    await fireEvent.click(screen.getByTitle('保存'));
     await fireEvent.change(screen.getByLabelText('保存换行符'), { target: { value: 'lf' } });
     expect(onSave).toHaveBeenCalledOnce();
     expect(onOptionsChange).toHaveBeenCalledWith(expect.objectContaining({ lineEnding: 'lf' }));
@@ -72,11 +72,11 @@ describe('editor chrome', () => {
 
     await fireEvent.click(screen.getByText('开始编辑'));
     expect(onToggleEditing).toHaveBeenCalledOnce();
-    expect((screen.getByTitle('保存（Ctrl+S）') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTitle('保存') as HTMLButtonElement).disabled).toBe(true);
 
     await rerender({ ...props, editing: true });
     expect(screen.getByText('退出编辑')).toBeTruthy();
-    expect((screen.getByTitle('保存（Ctrl+S）') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTitle('保存') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('offers an x button after the active document title', async () => {

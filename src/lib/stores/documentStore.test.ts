@@ -17,6 +17,7 @@ const opened: OpenedTextDocumentDto = {
   readOnly: false,
   revision: 0,
   bookmarks: [],
+  initialCharacterOffset: 0,
 };
 
 describe('documentStore', () => {

@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
 import type {
@@ -17,30 +16,18 @@ import type {
   RecentDocumentDto,
   SavedEpubDocument,
 } from '../types/epub';
-import { normalizeAppError } from './backend';
+import { invokeChecked } from './backend';
 
 export async function openEpubDocument(path: string): Promise<OpenedEpubDocumentDto> {
-  try {
-    return await invoke<OpenedEpubDocumentDto>('open_epub_document', { request: { path } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('open_epub_document', { request: { path } });
 }
 
 export async function closeEpubDocument(documentId: string): Promise<void> {
-  try {
-    await invoke<void>('close_epub_document', { request: { documentId } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  await invokeChecked<void>('close_epub_document', { request: { documentId } });
 }
 
 export async function saveEpubProgress(locator: EpubLocator): Promise<EpubLocator> {
-  try {
-    return await invoke<EpubLocator>('save_epub_progress', { request: { locator } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('save_epub_progress', { request: { locator } });
 }
 
 export async function saveEpubBookmark(
@@ -48,51 +35,29 @@ export async function saveEpubBookmark(
   title: string | null,
   bookmarkId: string | null = null,
 ): Promise<EpubBookmark> {
-  try {
-    return await invoke<EpubBookmark>('save_epub_bookmark', {
-      request: { locator, title, bookmarkId },
-    });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('save_epub_bookmark', { request: { locator, title, bookmarkId } });
 }
 
 export async function deleteEpubBookmark(documentId: string, bookmarkId: string): Promise<void> {
-  try {
-    await invoke<void>('delete_epub_bookmark', { request: { documentId, bookmarkId } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  await invokeChecked<void>('delete_epub_bookmark', { request: { documentId, bookmarkId } });
 }
 
 export async function searchEpubDocument(
   request: EpubSearchRequest,
 ): Promise<EpubSearchResult[]> {
-  try {
-    return await invoke<EpubSearchResult[]>('search_epub_document', { request });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('search_epub_document', { request });
 }
 
 export async function cancelEpubSearch(documentId: string, requestId: string): Promise<void> {
-  await invoke<void>('cancel_epub_search', { request: { documentId, requestId } }).catch(() => {});
+  await invokeChecked<void>('cancel_epub_search', { request: { documentId, requestId } }).catch(() => {});
 }
 
 export async function listRecentDocuments(maximum = 20): Promise<RecentDocumentDto[]> {
-  try {
-    return await invoke<RecentDocumentDto[]>('list_recent_documents', { request: { maximum } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  return invokeChecked('list_recent_documents', { request: { maximum } });
 }
 
 export async function deleteRecentDocument(path: string): Promise<void> {
-  try {
-    await invoke<void>('delete_recent_document', { request: { path } });
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
+  await invokeChecked<void>('delete_recent_document', { request: { path } });
 }
 
 export async function chooseEpubCoverPath(): Promise<string | null> {
@@ -254,14 +219,6 @@ export async function importEpubChapterImage(
   return invokeChecked('import_epub_chapter_image', {
     request: { editSessionId, chapterEditId, selectedPath },
   });
-}
-
-async function invokeChecked<T>(command: string, args: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
 }
 
 export function epubResourceUrl(

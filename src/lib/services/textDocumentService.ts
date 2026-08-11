@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 
 import type {
@@ -8,7 +7,7 @@ import type {
   TextBookmark,
   TextEncoding,
 } from '../types/document';
-import { normalizeAppError } from './backend';
+import { invokeChecked } from './backend';
 
 export async function chooseSavePath(defaultPath: string): Promise<string | null> {
   return await save({
@@ -63,6 +62,16 @@ export async function closeTextDocument(documentId: string): Promise<void> {
   await invokeChecked<void>('close_text_document', { request: { documentId } });
 }
 
+export async function saveTextProgress(
+  documentId: string,
+  characterOffset: number,
+  lineNumber: number,
+): Promise<void> {
+  await invokeChecked<void>('save_text_progress', {
+    request: { documentId, characterOffset, lineNumber },
+  });
+}
+
 export async function saveTextBookmark(
   documentId: string,
   characterOffset: number,
@@ -78,12 +87,4 @@ export async function saveTextBookmark(
 
 export async function deleteTextBookmark(documentId: string, bookmarkId: string): Promise<void> {
   await invokeChecked<void>('delete_text_bookmark', { request: { documentId, bookmarkId } });
-}
-
-async function invokeChecked<T>(command: string, args: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    throw normalizeAppError(error);
-  }
 }

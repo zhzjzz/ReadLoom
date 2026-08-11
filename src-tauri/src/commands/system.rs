@@ -2,15 +2,35 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{StartupState, error::AppError};
 
 const MAX_PROBE_MESSAGE_CHARS: usize = 128;
+pub(crate) const TRAY_ID: &str = "readloom-tray";
+
+#[derive(Default)]
+pub(crate) struct WindowBehaviorState {
+    minimize_to_tray: AtomicBool,
+}
+
+impl WindowBehaviorState {
+    pub(crate) fn minimize_to_tray(&self) -> bool {
+        self.minimize_to_tray.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyWindowBehaviorRequest {
+    tray_visible: bool,
+    minimize_to_tray: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +104,22 @@ pub fn frontend_ready(state: State<'_, StartupState>) -> Result<StartupMetricsDt
     }
 
     Ok(metrics)
+}
+
+#[tauri::command]
+pub fn apply_window_behavior(
+    app: AppHandle,
+    state: State<'_, WindowBehaviorState>,
+    request: ApplyWindowBehaviorRequest,
+) -> Result<(), AppError> {
+    state
+        .minimize_to_tray
+        .store(request.minimize_to_tray, Ordering::Relaxed);
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| AppError::internal("TRAY_UNAVAILABLE", "find Readloom tray icon"))?;
+    tray.set_visible(request.tray_visible)
+        .map_err(|_| AppError::internal("TRAY_UNAVAILABLE", "update Readloom tray icon"))
 }
 
 fn unix_time_ms() -> u64 {

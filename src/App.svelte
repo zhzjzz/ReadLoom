@@ -1,12 +1,15 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
 
   import EditorStatusBar from './lib/components/EditorStatusBar.svelte';
   import EditorToolbar from './lib/components/EditorToolbar.svelte';
-  import InspectorPane from './lib/components/InspectorPane.svelte';
+  import LibraryImportReviewDialog from './lib/components/LibraryImportReviewDialog.svelte';
   import LibraryView from './lib/components/LibraryView.svelte';
   import NavigationPane from './lib/components/NavigationPane.svelte';
+  import SettingsView from './lib/components/SettingsView.svelte';
+  import TextToolsPane from './lib/components/TextToolsPane.svelte';
   import TopBar from './lib/components/TopBar.svelte';
   import UnsavedChangesDialog from './lib/components/UnsavedChangesDialog.svelte';
   import TextEditor from './lib/editors/TextEditor.svelte';
@@ -15,13 +18,21 @@
     DEFAULT_TEXT_HEADING_PATTERN,
     type TextHeading,
   } from './lib/editors/textHeadings';
-  import { resizedPaneWidth, type WorkspacePaneSide } from './lib/layout/workspaceLayout';
+  import { resizedPaneWidth, resizedPaneWidthFromKeyboard } from './lib/layout/workspaceLayout';
+  import {
+    applyWindowBehavior,
+    backgroundImageUrl,
+    clearBackgroundImage,
+    getBackgroundImage,
+    setBackgroundImage,
+  } from './lib/services/appearanceService';
   import {
     hasTauriRuntime,
     normalizeAppError,
     probeBackend,
     reportFrontendReady,
   } from './lib/services/backend';
+  import { createBooksBackup, restoreBooksBackup } from './lib/services/backupService';
   import { createShortcutHandler } from './lib/services/shortcuts';
   import {
     beginEpubEdit,
@@ -30,11 +41,9 @@
     chooseEpubCoverPath,
     chooseEpubSavePath,
     closeEpubDocument,
-    deleteRecentDocument,
     discardEpubDraft,
     epubResourceUrl,
     getEpubEditDraft,
-    listRecentDocuments,
     openEpubDocument,
     prepareEpubOverwriteConfirmation,
     removeEpubCoverChange,
@@ -44,6 +53,18 @@
     validateEpubChapterDraft,
   } from './lib/services/epubDocumentService';
   import {
+    assignLibraryGroup,
+    createLibraryGroup,
+    deleteLibraryGroup,
+    importLibraryDocuments,
+    listLibrary,
+    removeLibraryDocument,
+    removeUnavailableLibraryDocuments,
+    renameLibraryGroup,
+    previewLibraryDirectory,
+    previewLibraryDocuments,
+  } from './lib/services/libraryService';
+  import {
     chooseSavePath,
     closeTextDocument,
     deleteTextBookmark,
@@ -51,13 +72,21 @@
     reopenTextDocument,
     saveTextDocument,
     saveTextDocumentAs,
+    saveTextProgress,
     saveTextBookmark,
   } from './lib/services/textDocumentService';
   import {
     chooseDocumentFile,
+    chooseBackgroundImage,
+    chooseBooksBackupFiles,
+    chooseBooksBackupPath,
+    chooseBooksRestoreDirectory,
+    chooseLibraryDirectory,
+    chooseLibraryFiles,
     classifyDocumentPath,
   } from './lib/services/workspaceFileService';
   import { documentStore } from './lib/stores/documentStore';
+  import { loadAppSettings, normalizeAppSettings, persistAppSettings } from './lib/stores/appSettings';
   import {
     initializeTheme,
     setTheme,
@@ -79,9 +108,19 @@
     EpubEditDraft,
     EpubMetadataPatch,
     OpenedEpubDocumentDto,
-    RecentDocumentDto,
   } from './lib/types/epub';
   import type { AppErrorDto, BackendConnection } from './lib/types/ipc';
+  import type {
+    BooksBackupResultDto,
+    BooksRestoreResultDto,
+  } from './lib/types/backup';
+  import type {
+    LibraryDocumentDto,
+    LibraryGroupDto,
+    LibraryImportResultDto,
+    LibraryImportPreviewDto,
+  } from './lib/types/library';
+  import type { AppSettings, BackgroundImageDto } from './lib/types/settings';
   import type { WorkspaceTab, WorkspaceTabSummary } from './lib/types/workspace';
 
   type PendingAction = 'close' | 'exit-edit' | 'open' | 'exit' | 'reopen';
@@ -112,20 +151,30 @@
   let tabs: WorkspaceTab[] = [];
   let activeTabId: string | null = null;
   let editorInstanceKey = 0;
-  let recentDocuments: RecentDocumentDto[] = [];
-  let activeView: 'workspace' | 'library' = 'workspace';
+  let libraryDocuments: LibraryDocumentDto[] = [];
+  let libraryGroups: LibraryGroupDto[] = [];
+  let activeView: 'workspace' | 'library' | 'settings' = 'library';
   let libraryLoading = false;
+  let libraryImportStatus: string | null = null;
+  let libraryImportPreview: LibraryImportPreviewDto | null = null;
+  let libraryImporting = false;
   let textHeadings: TextHeading[] = [];
   let textBookmarks: TextBookmark[] = [];
   let headingPattern = DEFAULT_TEXT_HEADING_PATTERN;
   let headingPatternDraft = DEFAULT_TEXT_HEADING_PATTERN;
   let headingPatternError: string | null = null;
+  let appSettings: AppSettings = loadAppSettings();
+  let backgroundImage: BackgroundImageDto | null = null;
+  let backupPath: string | null = null;
+  let backupResult: BooksBackupResultDto | null = null;
+  let restoreResult: BooksRestoreResultDto | null = null;
+  let backupBusy = false;
+  let initialTextOffset = 0;
+  let textProgressTimer: ReturnType<typeof setTimeout> | null = null;
   let dragActive = false;
   let leftPaneWidth = 220;
-  let rightPaneWidth = 320;
   let leftPaneCollapsed = false;
-  let rightPaneCollapsed = true;
-  let resizingPane: WorkspacePaneSide | null = null;
+  let resizingPane = false;
   let stopPaneResize: (() => void) | null = null;
 
   $: activeDocument = $documentStore.active;
@@ -140,6 +189,7 @@
     epubEditDraft,
     epubChapterLocalDirty,
   );
+  $: currentBackgroundUrl = backgroundImage ? backgroundImageUrl(backgroundImage.key) : null;
 
   onMount(() => {
     documentStore.reset();
@@ -167,16 +217,24 @@
         }
         return false;
       },
-    });
+      showLibrary: () => void showLibrary(),
+      showSettings: () => void showSettings(),
+    }, () => appSettings.shortcuts);
     window.addEventListener('keydown', shortcutHandler, { capture: true });
 
     let unlistenClose: (() => void) | null = null;
     let unlistenDragDrop: (() => void) | null = null;
+    let unlistenTrayExit: (() => void) | null = null;
     let disposed = false;
     if (desktopRuntime) {
       const currentWindow = getCurrentWindow();
       void currentWindow
         .onCloseRequested((event) => {
+          if (appSettings.closeAction === 'tray') {
+            event.preventDefault();
+            void currentWindow.hide();
+            return;
+          }
           const dirtyDocumentId = firstDirtyTabId();
           if (dirtyDocumentId || saving) {
             event.preventDefault();
@@ -185,6 +243,9 @@
             } else {
               pendingAction = 'exit';
             }
+          } else if (activeDocument || epubDocument) {
+            event.preventDefault();
+            void continueExit();
           }
         })
         .then((unlisten) => {
@@ -207,6 +268,21 @@
         .catch((error) => {
           documentStore.failed(normalizeAppError(error));
         });
+      void listen('readloom-request-exit', () => {
+        const dirtyDocumentId = firstDirtyTabId();
+        if (dirtyDocumentId || saving) {
+          if (dirtyDocumentId && dirtyDocumentId !== activeTabId) {
+            void activateTab(dirtyDocumentId).then(() => (pendingAction = 'exit'));
+          } else {
+            pendingAction = 'exit';
+          }
+          return;
+        }
+        void continueExit();
+      }).then((unlisten) => {
+        if (disposed) unlisten();
+        else unlistenTrayExit = unlisten;
+      });
     }
 
     return () => {
@@ -214,7 +290,9 @@
       disposeTheme();
       unlistenClose?.();
       unlistenDragDrop?.();
+      unlistenTrayExit?.();
       stopPaneResize?.();
+      if (textProgressTimer) clearTimeout(textProgressTimer);
       window.removeEventListener('keydown', shortcutHandler, { capture: true });
     };
   });
@@ -229,33 +307,109 @@
       const startup = await reportFrontendReady();
       const probe = await probeBackend('阅织 EPUB 通信正常');
       connection = { status: 'connected', startup, probe };
-      await refreshRecentDocuments();
+      backgroundImage = await getBackgroundImage();
+      await applyWindowBehavior(appSettings);
+      await refreshLibrary();
     } catch (error) {
       connection = { status: 'error', error: normalizeAppError(error) };
     }
   }
 
-  async function refreshRecentDocuments(): Promise<void> {
+  async function refreshLibrary(): Promise<void> {
     if (!desktopRuntime) return;
     libraryLoading = true;
     try {
-      recentDocuments = await listRecentDocuments(100);
+      const snapshot = await listLibrary(500);
+      libraryDocuments = snapshot.documents;
+      libraryGroups = snapshot.groups;
     } catch {
-      // 最近文件是辅助状态，失败不能阻止打开和阅读。
+      // 书库状态失败不能阻止直接打开和阅读本地文件。
     } finally {
       libraryLoading = false;
     }
   }
 
-  function openRecent(document: RecentDocumentDto): void {
+  async function importSelectedLibraryFiles(): Promise<void> {
+    if (!desktopRuntime || libraryLoading) return;
+    try {
+      const paths = await chooseLibraryFiles();
+      if (!paths.length) return;
+      libraryLoading = true;
+      libraryImportStatus = `正在检查 ${paths.length} 个图书文件…`;
+      libraryImportPreview = await previewLibraryDocuments(paths);
+      libraryImportStatus = null;
+    } catch (error) {
+      const appError = normalizeAppError(error);
+      libraryImportStatus = appError.message;
+      documentStore.failed(appError);
+    } finally {
+      libraryLoading = false;
+    }
+  }
+
+  async function importSelectedLibraryDirectory(): Promise<void> {
+    if (!desktopRuntime || libraryLoading) return;
+    try {
+      const directory = await chooseLibraryDirectory();
+      if (!directory) return;
+      libraryLoading = true;
+      libraryImportStatus = '正在扫描目录中的 EPUB / TXT…';
+      libraryImportPreview = await previewLibraryDirectory(directory);
+      libraryImportStatus = null;
+    } catch (error) {
+      const appError = normalizeAppError(error);
+      libraryImportStatus = appError.message;
+      documentStore.failed(appError);
+    } finally {
+      libraryLoading = false;
+    }
+  }
+
+  async function confirmLibraryImport(paths: string[]): Promise<void> {
+    if (!paths.length || libraryImporting) return;
+    libraryImporting = true;
+    try {
+      libraryImportStatus = `正在解析并导入 ${paths.length} 本图书…`;
+      const result = await importLibraryDocuments(paths);
+      libraryImportStatus = describeLibraryImport(result);
+      libraryImportPreview = null;
+      await refreshLibrary();
+    } catch (error) {
+      const appError = normalizeAppError(error);
+      libraryImportStatus = appError.message;
+      documentStore.failed(appError);
+    } finally {
+      libraryImporting = false;
+    }
+  }
+
+  function describeLibraryImport(result: LibraryImportResultDto): string {
+    const details = [`已导入 ${result.imported} 本`];
+    if (result.skipped) details.push(`跳过 ${result.skipped} 个重复选择`);
+    if (result.failed.length) {
+      details.push(`${result.failed.length} 个文件失败：${result.failed[0].message}`);
+    }
+    return details.join(' · ');
+  }
+
+  function openLibraryDocument(document: LibraryDocumentDto): void {
     if (!document.available) return;
     void openDocumentPath(document.path);
   }
 
   async function showLibrary(): Promise<void> {
-    if (activeView === 'library') return;
+    await showStaticView('library');
+  }
+
+  async function showSettings(): Promise<void> {
+    await showStaticView('settings');
+  }
+
+  async function showStaticView(target: 'library' | 'settings'): Promise<void> {
+    if (activeView === target) return;
     if (!(await flushActiveEpubChapterDraft())) return;
     await epubReaderHandle?.flushProgress().catch(() => {});
+    await flushActiveTextProgress();
     snapshotActiveTab();
     if (activeDocument) {
       const activeTextTab = tabs.find((tab) => tab.kind === 'txt' && tab.documentId === activeTabId);
@@ -264,11 +418,20 @@
       textHeadings = [];
       editorInstanceKey += 1;
     }
-    activeView = 'library';
+    activeView = target;
   }
 
   function showWorkspace(): void {
     activeView = 'workspace';
+  }
+
+  function toggleSettingsView(): void {
+    if (activeView === 'settings') {
+      if (activeTabId) showWorkspace();
+      else void showLibrary();
+      return;
+    }
+    void showSettings();
   }
 
   async function selectWorkspaceTab(documentId: string): Promise<void> {
@@ -276,41 +439,33 @@
     activeView = 'workspace';
   }
 
-  function maximumPaneWidth(side: WorkspacePaneSide): number {
-    const otherWidth = side === 'left'
-      ? (rightPaneCollapsed ? 0 : rightPaneWidth)
-      : (leftPaneCollapsed ? 0 : leftPaneWidth);
-    return Math.max(180, Math.min(520, window.innerWidth - otherWidth - 360 - 16));
+  function maximumPaneWidth(): number {
+    return Math.max(180, Math.min(420, window.innerWidth - 480));
   }
 
-  function setPaneWidth(side: WorkspacePaneSide, width: number): void {
-    if (side === 'left') leftPaneWidth = width;
-    else rightPaneWidth = width;
-  }
-
-  function beginPaneResize(side: WorkspacePaneSide, event: PointerEvent): void {
-    if (event.button !== 0 || (side === 'left' ? leftPaneCollapsed : rightPaneCollapsed)) return;
+  function beginPaneResize(event: PointerEvent): void {
+    if (event.button !== 0 || leftPaneCollapsed) return;
     event.preventDefault();
     stopPaneResize?.();
     const startPointerX = event.clientX;
-    const startWidth = side === 'left' ? leftPaneWidth : rightPaneWidth;
-    resizingPane = side;
+    const startWidth = leftPaneWidth;
+    resizingPane = true;
 
     const move = (moveEvent: PointerEvent) => {
-      setPaneWidth(side, resizedPaneWidth(
-        side,
+      leftPaneWidth = resizedPaneWidth(
+        'left',
         startWidth,
         startPointerX,
         moveEvent.clientX,
         180,
-        maximumPaneWidth(side),
-      ));
+        maximumPaneWidth(),
+      );
     };
     const finish = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
-      resizingPane = null;
+      resizingPane = false;
       stopPaneResize = null;
     };
     window.addEventListener('pointermove', move);
@@ -319,23 +474,154 @@
     stopPaneResize = finish;
   }
 
-  function resizePaneFromKeyboard(side: WorkspacePaneSide, event: KeyboardEvent): void {
-    const current = side === 'left' ? leftPaneWidth : rightPaneWidth;
-    const direction = side === 'left' ? 1 : -1;
-    let requested: number | null = null;
-    if (event.key === 'ArrowRight') requested = current + 12 * direction;
-    else if (event.key === 'ArrowLeft') requested = current - 12 * direction;
-    else if (event.key === 'Home') requested = 180;
-    else if (event.key === 'End') requested = maximumPaneWidth(side);
+  function resizePaneFromKeyboard(event: KeyboardEvent): void {
+    const requested = resizedPaneWidthFromKeyboard(
+      'left',
+      leftPaneWidth,
+      event.key,
+      180,
+      maximumPaneWidth(),
+    );
     if (requested === null) return;
     event.preventDefault();
-    setPaneWidth(side, Math.max(180, Math.min(maximumPaneWidth(side), requested)));
+    leftPaneWidth = requested;
   }
 
-  async function removeRecent(document: RecentDocumentDto): Promise<void> {
+  async function removeLibraryBook(document: LibraryDocumentDto): Promise<void> {
     try {
-      await deleteRecentDocument(document.path);
-      recentDocuments = recentDocuments.filter((item) => item.path !== document.path);
+      await removeLibraryDocument(document.path);
+      libraryDocuments = libraryDocuments.filter((item) => item.path !== document.path);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function cleanupUnavailableLibraryBooks(): Promise<void> {
+    const count = libraryDocuments.filter((document) => !document.available).length;
+    if (!count || !window.confirm(`从书库移除 ${count} 本已移动或删除的无效书籍？原文件不会被删除。`)) return;
+    try {
+      const removed = await removeUnavailableLibraryDocuments();
+      libraryDocuments = libraryDocuments.filter((document) => document.available);
+      libraryImportStatus = `已清理 ${removed} 本无效书籍`;
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  function changeAppSettings(patch: Partial<AppSettings>): void {
+    appSettings = normalizeAppSettings({ ...appSettings, ...patch });
+    persistAppSettings(appSettings);
+    if (desktopRuntime) {
+      void applyWindowBehavior(appSettings).catch((error) => {
+        documentStore.failed(normalizeAppError(error));
+      });
+    }
+  }
+
+  async function chooseCustomBackground(): Promise<void> {
+    if (!desktopRuntime) return;
+    try {
+      const path = await chooseBackgroundImage();
+      if (!path) return;
+      backgroundImage = await setBackgroundImage(path);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function clearCustomBackground(): Promise<void> {
+    if (!desktopRuntime || !backgroundImage) return;
+    try {
+      await clearBackgroundImage();
+      backgroundImage = null;
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function selectBackupPath(): Promise<void> {
+    if (!desktopRuntime || backupBusy) return;
+    const selected = await chooseBooksBackupPath();
+    if (selected) {
+      backupPath = selected.toLocaleLowerCase().endsWith('.readloom-backup')
+        ? selected
+        : `${selected}.readloom-backup`;
+      backupResult = null;
+    }
+  }
+
+  async function backupAllBooks(): Promise<void> {
+    if (!desktopRuntime || !backupPath || backupBusy) return;
+    if (!window.confirm('备份只保留图书文件内容，不包含书签、阅读进度、分组、设置或阅读记录。继续吗？')) return;
+    backupBusy = true;
+    try {
+      backupResult = await createBooksBackup(backupPath);
+      restoreResult = null;
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function restoreBookBackups(): Promise<void> {
+    if (!desktopRuntime || backupBusy) return;
+    try {
+      const backups = await chooseBooksBackupFiles();
+      if (!backups.length) return;
+      const directory = await chooseBooksRestoreDirectory();
+      if (!directory) return;
+      if (!window.confirm(`将从 ${backups.length} 个备份中恢复图书内容到：\n${directory}\n\n重复内容会自动跳过；书签、阅读进度和设置不会恢复。继续吗？`)) return;
+      backupBusy = true;
+      restoreResult = await restoreBooksBackup(backups, directory);
+      backupResult = null;
+      await refreshLibrary();
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function addLibraryGroup(name: string): Promise<void> {
+    try {
+      const group = await createLibraryGroup(name);
+      libraryGroups = [...libraryGroups, group].sort((left, right) => left.position - right.position);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function renameLibraryShelf(group: LibraryGroupDto, name: string): Promise<void> {
+    try {
+      await renameLibraryGroup(group.groupId, name);
+      libraryGroups = libraryGroups.map((item) => item.groupId === group.groupId
+        ? { ...item, name }
+        : item);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function deleteLibraryShelf(group: LibraryGroupDto): Promise<void> {
+    try {
+      await deleteLibraryGroup(group.groupId);
+      libraryGroups = libraryGroups.filter((item) => item.groupId !== group.groupId);
+      libraryDocuments = libraryDocuments.map((document) => document.groupId === group.groupId
+        ? { ...document, groupId: null }
+        : document);
+    } catch (error) {
+      documentStore.failed(normalizeAppError(error));
+    }
+  }
+
+  async function moveLibraryBook(document: LibraryDocumentDto, groupId: string | null): Promise<void> {
+    if (document.groupId === groupId) return;
+    try {
+      await assignLibraryGroup(document.path, groupId);
+      libraryDocuments = libraryDocuments.map((item) => item.path === document.path
+        ? { ...item, groupId }
+        : item);
     } catch (error) {
       documentStore.failed(normalizeAppError(error));
     }
@@ -402,6 +688,7 @@
           session: { ...activeDocument },
           content: editorHandle?.getContent() ?? tab.content,
           bookmarks: [...textBookmarks],
+          readingOffset: editorHandle?.getReadingOffset() ?? tab.readingOffset,
         };
       }
       if (tab.kind === 'epub' && epubDocument) {
@@ -424,6 +711,7 @@
     if (documentId === activeTabId) return;
     if (!(await flushActiveEpubChapterDraft())) return;
     await epubReaderHandle?.flushProgress().catch(() => {});
+    await flushActiveTextProgress();
     snapshotActiveTab();
     const target = tabs.find((tab) => tab.documentId === documentId);
     if (!target) return;
@@ -446,6 +734,7 @@
       epubChapterLocalDirty = false;
       epubSaving = false;
       initialContent = target.content;
+      initialTextOffset = target.readingOffset;
       textBookmarks = [...target.bookmarks];
       editorInstanceKey += 1;
       documentStore.restore({ ...target.session });
@@ -721,7 +1010,7 @@
         epubChapterDraft = await validateEpubChapterDraft(epubChapterDraft.chapterEditId);
         epubChapterLocalDirty = false;
       }
-      await refreshRecentDocuments();
+      await refreshLibrary();
       if (window.confirm(`已安全另存为：\n${saved.targetPath}\n\n是否在新标签中打开？`)) {
         await openEpubPath(saved.targetPath);
       }
@@ -769,6 +1058,7 @@
         return;
       }
       await epubReaderHandle?.flushProgress().catch(() => {});
+      await flushActiveTextProgress();
       snapshotActiveTab();
 
       EpubReaderComponent ??= (await import('./lib/readers/epub/EpubReader.svelte')).default;
@@ -805,7 +1095,7 @@
         },
       ];
       documentStore.close();
-      await refreshRecentDocuments();
+      await refreshLibrary();
     } catch (error) {
       epubError = normalizeAppError(error);
     }
@@ -867,6 +1157,7 @@
       encodingRecoveryPath = null;
       epubError = null;
       await epubReaderHandle?.flushProgress().catch(() => {});
+      await flushActiveTextProgress();
       snapshotActiveTab();
       epubDocument = null;
       epubReaderHandle = null;
@@ -882,10 +1173,11 @@
             session: { ...openedSession },
             content: opened.content,
             bookmarks: [...opened.bookmarks],
+            readingOffset: opened.initialCharacterOffset,
           },
         ];
       }
-      await refreshRecentDocuments();
+      await refreshLibrary();
     } catch (error) {
       const appError = normalizeAppError(error);
       if (appError.code === 'LARGE_FILE_CONFIRMATION_REQUIRED' && !allowLarge) {
@@ -905,13 +1197,14 @@
     textBookmarks = [...opened.bookmarks];
     statistics = { lines: 0, characters: 0 };
     initialContent = opened.content;
+    initialTextOffset = opened.initialCharacterOffset;
     editorInstanceKey += 1;
     documentStore.open(opened);
     const restored = $documentStore.active;
     if (restored) {
       tabs = tabs.map((tab) =>
         tab.kind === 'txt' && tab.documentId === opened.documentId
-          ? { ...tab, session: { ...restored }, content: opened.content, bookmarks: [...opened.bookmarks] }
+          ? { ...tab, session: { ...restored }, content: opened.content, bookmarks: [...opened.bookmarks], readingOffset: opened.initialCharacterOffset }
           : tab,
       );
     }
@@ -920,7 +1213,37 @@
   function editorReady(handle: TextEditorHandle): void {
     editorHandle = handle;
     editorHandle.setEditing(editing);
+    if (initialTextOffset > 0) editorHandle.revealOffset(initialTextOffset, false);
     initialContent = '';
+  }
+
+  function queueTextProgress(offset: number): void {
+    if (!activeDocument) return;
+    tabs = tabs.map((tab) => tab.kind === 'txt' && tab.documentId === activeDocument?.documentId
+      ? { ...tab, readingOffset: offset }
+      : tab);
+    if (textProgressTimer) clearTimeout(textProgressTimer);
+    textProgressTimer = setTimeout(() => {
+      textProgressTimer = null;
+      void persistActiveTextProgress(offset);
+    }, 700);
+  }
+
+  async function persistActiveTextProgress(offset?: number): Promise<void> {
+    const document = activeDocument;
+    const editor = editorHandle;
+    if (!document || !editor) return;
+    const content = editor.getContent();
+    const position = describeTextPosition(content, offset ?? editor.getReadingOffset());
+    await saveTextProgress(document.documentId, position.characterOffset, position.lineNumber);
+  }
+
+  async function flushActiveTextProgress(): Promise<void> {
+    if (textProgressTimer) {
+      clearTimeout(textProgressTimer);
+      textProgressTimer = null;
+    }
+    await persistActiveTextProgress().catch(() => {});
   }
 
   function updateActiveTextBookmarks(bookmarks: TextBookmark[]): void {
@@ -1130,6 +1453,7 @@
     if (!documentId) return;
     const closedIndex = tabs.findIndex((tab) => tab.documentId === documentId);
     try {
+      await flushActiveTextProgress();
       await closeTextDocument(documentId);
       editing = false;
       editorHandle = null;
@@ -1190,6 +1514,8 @@
   }
 
   async function continueExit(): Promise<void> {
+    await epubReaderHandle?.flushProgress().catch(() => {});
+    await flushActiveTextProgress();
     snapshotActiveTab();
     const dirtyDocumentId = firstDirtyTabId();
     if (dirtyDocumentId) {
@@ -1247,9 +1573,10 @@
 </script>
 
 <div
-  class:resizing={Boolean(resizingPane)}
+  class:has-custom-background={Boolean(currentBackgroundUrl)}
+  class:resizing={resizingPane}
   class="app-shell"
-  style={`--left-pane-width: ${leftPaneCollapsed ? 0 : leftPaneWidth}px; --right-divider-width: ${rightPaneCollapsed ? 0 : 8}px; --workspace-right-pane-width: ${rightPaneCollapsed ? 0 : rightPaneWidth}px;`}
+  style={`--left-pane-width:${leftPaneCollapsed ? 0 : leftPaneWidth}px;--app-background-image:${currentBackgroundUrl ? `url(${currentBackgroundUrl})` : 'none'};--app-background-opacity:${appSettings.backgroundOpacity}`}
 >
   <TopBar
     activeTabId={activeTabId}
@@ -1259,11 +1586,11 @@
     displayTitle={epubDocument?.document.metadata.title ?? null}
     displayPath={epubDocument?.displayPath ?? null}
     hasDocument={Boolean(epubDocument)}
-    settingsOpen={!rightPaneCollapsed}
+    settingsOpen={activeView === 'settings'}
     onClose={requestClose}
     onCloseTab={(documentId) => void requestCloseTab(documentId)}
     onSelectTab={(documentId) => void selectWorkspaceTab(documentId)}
-    onToggleSettings={() => (rightPaneCollapsed = !rightPaneCollapsed)}
+    onToggleSettings={toggleSettingsView}
     tabs={tabSummaries}
   />
   <div class="workspace-grid">
@@ -1271,21 +1598,10 @@
       <NavigationPane
         {desktopRuntime}
         activeView={activeView}
-        recentDocuments={recentDocuments.slice(0, 6)}
         onOpen={requestOpen}
-        onOpenRecent={openRecent}
-        onRemoveRecent={(document) => void removeRecent(document)}
         onSelectLibrary={() => void showLibrary()}
+        onSelectSettings={() => void showSettings()}
         onSelectWorkspace={showWorkspace}
-        onRevealHeading={(heading) => editorHandle?.revealOffset(heading.from)}
-        activeTextDocument={activeView === 'workspace' && Boolean(activeDocument)}
-        getTextContent={() => editorHandle?.getContent() ?? ''}
-        onAddTextBookmark={() => void addActiveTextBookmark()}
-        onDeleteTextBookmark={(bookmark) => void removeActiveTextBookmark(bookmark)}
-        onRenameTextBookmark={(bookmark) => void renameActiveTextBookmark(bookmark)}
-        onRevealTextOffset={(offset) => editorHandle?.revealOffset(offset)}
-        textHeadings={activeView === 'workspace' ? textHeadings : []}
-        {textBookmarks}
       />
     {/if}
     <div class="pane-divider left-divider" style="grid-column: 2">
@@ -1293,12 +1609,12 @@
       <div
         aria-label="调整左侧栏宽度"
         aria-orientation="vertical"
-        aria-valuemax={maximumPaneWidth('left')}
+        aria-valuemax={maximumPaneWidth()}
         aria-valuemin="180"
         aria-valuenow={leftPaneWidth}
         class="resize-grip"
-        onkeydown={(event) => resizePaneFromKeyboard('left', event)}
-        onpointerdown={(event) => beginPaneResize('left', event)}
+        onkeydown={resizePaneFromKeyboard}
+        onpointerdown={beginPaneResize}
         role="separator"
         tabindex={leftPaneCollapsed ? -1 : 0}
       ></div>
@@ -1316,14 +1632,45 @@
         <div class="library-stage">
           <LibraryView
             {desktopRuntime}
-            documents={recentDocuments}
+            columns={appSettings.libraryColumns}
+            documents={libraryDocuments}
+            groups={libraryGroups}
+            importStatus={libraryImportStatus}
             loading={libraryLoading}
-            onImport={requestOpen}
-            onOpen={openRecent}
-            onRefresh={() => void refreshRecentDocuments()}
-            onRemove={(document) => void removeRecent(document)}
+            onCreateGroup={(name) => void addLibraryGroup(name)}
+            onDeleteGroup={(group) => void deleteLibraryShelf(group)}
+            onImportDirectory={() => void importSelectedLibraryDirectory()}
+            onImportFiles={() => void importSelectedLibraryFiles()}
+            onMoveToGroup={(document, groupId) => void moveLibraryBook(document, groupId)}
+            onOpen={openLibraryDocument}
+            onRefresh={() => void refreshLibrary()}
+            onRemove={(document) => void removeLibraryBook(document)}
+            onRemoveUnavailable={() => void cleanupUnavailableLibraryBooks()}
+            onRenameGroup={(group, name) => void renameLibraryShelf(group, name)}
           />
         </div>
+      {:else if activeView === 'settings'}
+        <SettingsView
+          {backupBusy}
+          {backupPath}
+          {backupResult}
+          {restoreResult}
+          backgroundKey={backgroundImage?.key ?? null}
+          backgroundUrl={currentBackgroundUrl}
+          {headingPatternError}
+          headingPattern={headingPatternDraft}
+          onChooseBackground={() => void chooseCustomBackground()}
+          onClearBackground={() => void clearCustomBackground()}
+          onChooseBackupPath={() => void selectBackupPath()}
+          onCreateBackup={() => void backupAllBooks()}
+          onHeadingPatternChange={changeHeadingPattern}
+          onResetHeadingPattern={resetHeadingPattern}
+          onRestoreBackup={() => void restoreBookBackups()}
+          onSettingsChange={changeAppSettings}
+          onThemeChange={changeTheme}
+          settings={appSettings}
+          theme={$themePreference}
+        />
       {:else}
       {#if !epubDocument}
         <EditorToolbar
@@ -1331,6 +1678,7 @@
           document={activeDocument}
           {editing}
           {saving}
+          shortcuts={appSettings.shortcuts}
           onClose={requestClose}
           onOpen={requestOpen}
           onOptionsChange={updateSaveOptions}
@@ -1369,25 +1717,6 @@
         </nav>
       {/if}
 
-      {#if workspaceError}
-        <div class="error-banner" role="alert">
-          <div>
-            <strong>{workspaceError.message}</strong>
-            {#if workspaceError.suggestedAction}<span>{workspaceError.suggestedAction}</span>{/if}
-          </div>
-          {#if encodingRecoveryPath}
-            <div class="encoding-actions" aria-label="手动选择文件编码">
-              {#each ['utf8', 'utf16Le', 'utf16Be', 'gbk', 'gb18030'] as encoding}
-                <button onclick={() => void openPath(encodingRecoveryPath!, encoding as TextEncoding, false)} type="button">
-                  {encoding}
-                </button>
-              {/each}
-            </div>
-          {/if}
-          <button aria-label="关闭错误提示" class="dismiss" onclick={dismissWorkspaceError} type="button">×</button>
-        </div>
-      {/if}
-
       <div class="editor-stage">
         {#if epubDocument && epubChapterEditMode && epubChapterDraft && EpubChapterEditorComponent}
           <svelte:component
@@ -1414,6 +1743,8 @@
             modifiedSpineIndices={epubEditDraft?.changes.modifiedChapters ?? []}
             spineIndex={epubSpineIndex}
             onSpineChange={(index: number) => void changeEpubSpine(index)}
+            readingSettings={appSettings.reading}
+            hasCustomBackground={Boolean(currentBackgroundUrl)}
           />
           {#if epubEditPanelOpen && epubEditDraft && EpubEditPanelComponent}
             <svelte:component
@@ -1436,16 +1767,32 @@
             />
           {/if}
         {:else if activeDocument}
-          {#key `${activeDocument.documentId}-${editorInstanceKey}`}
-            <TextEditor
-              {headingPattern}
-              {initialContent}
-              onDirtyChange={(value) => documentStore.markContentDirty(value)}
-              onHeadingsChange={(value) => (textHeadings = value)}
-              onReady={editorReady}
-              onStatisticsChange={(value) => (statistics = value)}
+          <div class="text-reader-body">
+            <TextToolsPane
+              getTextContent={() => editorHandle?.getContent() ?? initialContent}
+              onAddTextBookmark={() => void addActiveTextBookmark()}
+              onDeleteTextBookmark={(bookmark) => void removeActiveTextBookmark(bookmark)}
+              onRenameTextBookmark={(bookmark) => void renameActiveTextBookmark(bookmark)}
+              onRevealTextOffset={(offset) => editorHandle?.revealOffset(offset)}
+              {textBookmarks}
+              {textHeadings}
             />
-          {/key}
+            <div class="text-editor-slot">
+              {#key `${activeDocument.documentId}-${editorInstanceKey}`}
+                <TextEditor
+                  {headingPattern}
+                  hasCustomBackground={Boolean(currentBackgroundUrl)}
+                  {initialContent}
+                  onDirtyChange={(value) => documentStore.markContentDirty(value)}
+                  onHeadingsChange={(value) => (textHeadings = value)}
+                  onReadingPositionChange={queueTextProgress}
+                  onReady={editorReady}
+                  onStatisticsChange={(value) => (statistics = value)}
+                  readingSettings={appSettings.reading}
+                />
+              {/key}
+            </div>
+          </div>
         {:else}
           <section class="empty-state">
             <div class="empty-mark">R</div>
@@ -1456,48 +1803,40 @@
                 {desktopRuntime ? '选择文件' : '请在 Readloom 桌面版中打开'}
               </button>
             </div>
-            <span>拖入文件，或按 Ctrl+O 打开 · Ctrl+S 保存 · Ctrl+Shift+S 另存为</span>
+            <span>可拖入文件；常用操作可在“设置 / 操作 / 快捷键”中自行绑定</span>
           </section>
         {/if}
       </div>
       {/if}
+      {#if workspaceError}
+        <div class="error-banner" role="alert">
+          <div>
+            <strong>{workspaceError.message}</strong>
+            {#if workspaceError.suggestedAction}<span>{workspaceError.suggestedAction}</span>{/if}
+          </div>
+          {#if encodingRecoveryPath}
+            <div class="encoding-actions" aria-label="手动选择文件编码">
+              {#each ['utf8', 'utf16Le', 'utf16Be', 'gbk', 'gb18030'] as encoding}
+                <button onclick={() => void openPath(encodingRecoveryPath!, encoding as TextEncoding, false)} type="button">
+                  {encoding}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button aria-label="关闭错误提示" class="dismiss" onclick={dismissWorkspaceError} type="button">×</button>
+        </div>
+      {/if}
     </main>
 
-    {#if !rightPaneCollapsed}
-      <div class="pane-divider right-divider" style="grid-column: 4">
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (ARIA Window Splitter pattern) -->
-        <div
-          aria-label="调整右侧栏宽度"
-          aria-orientation="vertical"
-          aria-valuemax={maximumPaneWidth('right')}
-          aria-valuemin="180"
-          aria-valuenow={rightPaneWidth}
-          class="resize-grip"
-          onkeydown={(event) => resizePaneFromKeyboard('right', event)}
-          onpointerdown={(event) => beginPaneResize('right', event)}
-          role="separator"
-          tabindex="0"
-        ></div>
-      </div>
-      <div class="inspector-slot" style="grid-column: 5">
-        <InspectorPane
-          {headingPatternError}
-          headingPattern={headingPatternDraft}
-          onClose={() => (rightPaneCollapsed = true)}
-          onHeadingPatternChange={changeHeadingPattern}
-          onResetHeadingPattern={resetHeadingPattern}
-          onThemeChange={changeTheme}
-          theme={$themePreference}
-        />
-      </div>
-    {/if}
   </div>
   <EditorStatusBar
     document={activeView === 'workspace' ? activeDocument : null}
     epubStatus={activeView === 'workspace' && epubDocument
       ? `EPUB ${epubDocument.document.version} · ${epubChapterEditMode ? '章节编辑' : '安全阅读'} · ${dirty ? '有未另存修改' : '原文件只读'}`
       : null}
-    workspaceStatus={activeView === 'library' ? `书库 · ${recentDocuments.length} 本本地书籍` : null}
+    workspaceStatus={activeView === 'library'
+      ? `书库 · ${libraryDocuments.length} 本地书籍 · ${libraryGroups.length} 个分组`
+      : activeView === 'settings' ? '设置 · 本地配置' : null}
     {saving}
     {statistics}
   />
@@ -1510,6 +1849,15 @@
     </div>
   {/if}
 </div>
+
+{#if libraryImportPreview}
+  <LibraryImportReviewDialog
+    importing={libraryImporting}
+    preview={libraryImportPreview}
+    onCancel={() => { if (!libraryImporting) libraryImportPreview = null; }}
+    onConfirm={(paths) => void confirmLibraryImport(paths)}
+  />
+{/if}
 
 {#if pendingAction && (activeDocument || epubDocument)}
   <UnsavedChangesDialog
@@ -1534,7 +1882,7 @@
 
   .workspace-grid {
     display: grid;
-    grid-template-columns: var(--left-pane-width) 8px minmax(0, 1fr) var(--right-divider-width) var(--workspace-right-pane-width);
+    grid-template-columns: var(--left-pane-width) 8px minmax(0, 1fr);
     min-height: 0;
     min-width: 0;
   }
@@ -1543,16 +1891,6 @@
     background: var(--surface-chrome);
     position: relative;
     z-index: 5;
-  }
-
-  .inspector-slot {
-    min-height: 0;
-    min-width: 0;
-    overflow: hidden;
-  }
-
-  .inspector-slot :global(.inspector-pane) {
-    height: 100%;
   }
 
   .resize-grip {
@@ -1610,10 +1948,12 @@
   }
 
   .document-workspace {
+    background: var(--surface-canvas);
     display: flex;
     flex-direction: column;
     min-height: 0;
     min-width: 0;
+    position: relative;
   }
 
   .library-stage {
@@ -1627,6 +1967,40 @@
     min-height: 0;
     min-width: 0;
     position: relative;
+  }
+
+  .text-reader-body {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
+  }
+
+  .has-custom-background .text-reader-body {
+    background: transparent;
+  }
+
+  .document-workspace::before {
+    background-image: var(--app-background-image);
+    background-position: center;
+    background-size: cover;
+    content: '';
+    inset: 0;
+    opacity: var(--app-background-opacity);
+    pointer-events: none;
+    position: absolute;
+  }
+
+  .document-workspace > :global(*) {
+    position: relative;
+    z-index: 1;
+  }
+
+  .text-editor-slot {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
   }
 
   .epub-toolbar {

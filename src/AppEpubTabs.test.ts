@@ -8,11 +8,13 @@ const fixtures = vi.hoisted(() => ({
   closeHandler: null as ((event: { preventDefault(): void }) => void) | null,
   dragDropHandler: null as ((event: { payload: { type: string; paths?: string[] } }) => void) | null,
   chooseDocumentFile: vi.fn<() => Promise<string | null>>(),
+  chooseLibraryDirectory: vi.fn<() => Promise<string | null>>(),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     destroy: vi.fn(async () => {}),
+    hide: vi.fn(async () => {}),
     onCloseRequested: async (handler: (event: { preventDefault(): void }) => void) => {
       fixtures.closeHandler = handler;
       return vi.fn();
@@ -24,6 +26,10 @@ vi.mock('@tauri-apps/api/window', () => ({
       return vi.fn();
     },
   }),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => vi.fn()),
 }));
 
 vi.mock('./lib/services/backend', async (importOriginal) => ({
@@ -166,6 +172,7 @@ const openedText: OpenedTextDocumentDto = {
   readOnly: false,
   revision: 0,
   bookmarks: [],
+  initialCharacterOffset: 0,
 };
 
 vi.mock('./lib/services/epubDocumentService', async (importOriginal) => ({
@@ -187,8 +194,36 @@ vi.mock('./lib/services/epubDocumentService', async (importOriginal) => ({
   replaceEpubCover: vi.fn(async () => editDraft),
   removeEpubCoverChange: vi.fn(async () => editDraft),
   discardEpubDraft: vi.fn(async () => {}),
-  listRecentDocuments: vi.fn(async () => []),
-  deleteRecentDocument: vi.fn(async () => {}),
+}));
+
+vi.mock('./lib/services/appearanceService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/services/appearanceService')>()),
+  getBackgroundImage: vi.fn(async () => null),
+  applyWindowBehavior: vi.fn(async () => {}),
+  setBackgroundImage: vi.fn(),
+  clearBackgroundImage: vi.fn(),
+}));
+
+vi.mock('./lib/services/libraryService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/services/libraryService')>()),
+  listLibrary: vi.fn(async () => ({ documents: [], groups: [] })),
+  removeLibraryDocument: vi.fn(async () => {}),
+  createLibraryGroup: vi.fn(),
+  renameLibraryGroup: vi.fn(async () => {}),
+  deleteLibraryGroup: vi.fn(async () => {}),
+  assignLibraryGroup: vi.fn(async () => {}),
+  removeUnavailableLibraryDocuments: vi.fn(async () => 0),
+  previewLibraryDirectory: vi.fn(async () => ({
+    rootPath: 'D:\\Books',
+    totalSizeBytes: 2048,
+    importable: 1,
+    alreadyImported: 1,
+    candidates: [
+      { path: 'D:\\Books\\新书.txt', fileName: '新书.txt', documentKind: 'txt', sizeBytes: 1024, alreadyImported: false },
+      { path: 'D:\\Books\\旧书.epub', fileName: '旧书.epub', documentKind: 'epub', sizeBytes: 1024, alreadyImported: true },
+    ],
+  })),
+  importLibraryDocuments: vi.fn(async () => ({ imported: 1, skipped: 0, failed: [] })),
 }));
 
 vi.mock('./lib/services/textDocumentService', async (importOriginal) => ({
@@ -205,19 +240,24 @@ vi.mock('./lib/services/textDocumentService', async (importOriginal) => ({
     updatedAtMs: 1,
   })),
   deleteTextBookmark: vi.fn(async () => {}),
+  saveTextProgress: vi.fn(async () => {}),
 }));
 
 vi.mock('./lib/services/workspaceFileService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./lib/services/workspaceFileService')>()),
   chooseDocumentFile: fixtures.chooseDocumentFile,
+  chooseLibraryDirectory: fixtures.chooseLibraryDirectory,
 }));
 
 import App from './App.svelte';
+import { openEpubDocument } from './lib/services/epubDocumentService';
 import {
-  deleteRecentDocument,
-  listRecentDocuments,
-  openEpubDocument,
-} from './lib/services/epubDocumentService';
+  listLibrary,
+  importLibraryDocuments,
+  previewLibraryDirectory,
+  removeLibraryDocument,
+  removeUnavailableLibraryDocuments,
+} from './lib/services/libraryService';
 import { openTextDocument, saveTextBookmark } from './lib/services/textDocumentService';
 
 describe('EPUB and TXT workspace tabs', () => {
@@ -228,14 +268,17 @@ describe('EPUB and TXT workspace tabs', () => {
     expect(screen.queryByText('后端版本')).toBeNull();
     expect(screen.queryByText('协议版本')).toBeNull();
     expect(screen.queryByText('文件安全')).toBeNull();
-    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+    expect(screen.queryByRole('region', { name: '设置' })).toBeNull();
     expect(screen.queryByRole('button', { name: '展开设置面板' })).toBeNull();
 
     await fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
 
-    expect(screen.getByRole('complementary', { name: '设置' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: '设置' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: '收起设置面板' })).toBeNull();
     expect(screen.getByText('外观')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: '页面布局' }));
+    expect(screen.getByRole('radiogroup', { name: '书库每行显示' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: '章节识别' }));
     const headingPattern = screen.getByLabelText('TXT 标题识别正则');
     expect(headingPattern).toBeTruthy();
 
@@ -245,28 +288,79 @@ describe('EPUB and TXT workspace tabs', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('deletes a recent document through the backend and removes the row immediately', async () => {
-    vi.mocked(listRecentDocuments).mockResolvedValueOnce([{
-      path: 'C:\\最近.txt',
-      documentKind: 'txt',
-      displayTitle: '最近.txt',
-      author: null,
-      fingerprint: null,
-      lastOpenedAtMs: 1,
-      available: true,
-    }]);
+  it('removes a library entry through the independent library backend', async () => {
+    vi.mocked(listLibrary).mockResolvedValueOnce({
+      documents: [{
+        path: 'C:\\书库.txt',
+        documentKind: 'txt',
+        displayTitle: '书库.txt',
+        author: null,
+        fingerprint: null,
+        lastOpenedAtMs: 1,
+        available: true,
+        groupId: null,
+        coverKey: null,
+      }],
+      groups: [],
+    });
     render(App);
-    const removeButton = await screen.findByRole('button', { name: '从最近文件中移除 最近.txt' });
+    const removeButton = await screen.findByRole('button', { name: '从书库移除 书库.txt' });
 
     await fireEvent.click(removeButton);
 
-    await waitFor(() => expect(deleteRecentDocument).toHaveBeenCalledWith('C:\\最近.txt'));
-    expect(screen.queryByText('最近.txt')).toBeNull();
+    await waitFor(() => expect(removeLibraryDocument).toHaveBeenCalledWith('C:\\书库.txt'));
+    expect(screen.queryByText('书库.txt')).toBeNull();
+  });
+
+  it('reviews a selected directory before importing only new checked books', async () => {
+    fixtures.chooseLibraryDirectory.mockResolvedValueOnce('D:\\Books');
+    vi.mocked(previewLibraryDirectory).mockClear();
+    vi.mocked(importLibraryDocuments).mockClear();
+    render(App);
+
+    await fireEvent.click(await screen.findByRole('button', { name: '导入目录' }));
+
+    expect(await screen.findByRole('dialog', { name: '导入前确认' })).toBeTruthy();
+    expect(previewLibraryDirectory).toHaveBeenCalledWith('D:\\Books');
+    expect((screen.getByLabelText('选择 旧书.epub') as HTMLInputElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByRole('button', { name: '导入所选图书' }));
+
+    await waitFor(() => expect(importLibraryDocuments).toHaveBeenCalledWith(['D:\\Books\\新书.txt']));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '导入前确认' })).toBeNull());
+  });
+
+  it('confirms and removes all unavailable library records without deleting files', async () => {
+    vi.mocked(listLibrary).mockResolvedValueOnce({
+      documents: [{
+        path: 'C:\\moved\\旧书.epub',
+        documentKind: 'epub',
+        displayTitle: '旧书',
+        author: null,
+        fingerprint: 'missing',
+        lastOpenedAtMs: 1,
+        available: false,
+        groupId: null,
+        coverKey: null,
+      }],
+      groups: [],
+    });
+    vi.mocked(removeUnavailableLibraryDocuments).mockResolvedValueOnce(1);
+    const confirm = vi.spyOn(window, 'confirm').mockImplementation(() => true);
+    render(App);
+
+    const cleanupButton = await screen.findByRole('button', { name: '清理无效书籍' });
+    await waitFor(() => expect((cleanupButton as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(cleanupButton);
+
+    expect(confirm).toHaveBeenCalledOnce();
+    await waitFor(() => expect(removeUnavailableLibraryDocuments).toHaveBeenCalledOnce());
+    expect(confirm).toHaveBeenCalledWith('从书库移除 1 本已移动或删除的无效书籍？原文件不会被删除。');
+    confirm.mockRestore();
   });
 
   it('opens the persisted library, filters books and returns to the workspace from a card', async () => {
-    vi.mocked(listRecentDocuments).mockResolvedValueOnce([
-      {
+    vi.mocked(listLibrary).mockResolvedValueOnce({
+      documents: [{
         path: 'C:\\测试.epub',
         documentKind: 'epub',
         displayTitle: '测试 EPUB',
@@ -274,6 +368,8 @@ describe('EPUB and TXT workspace tabs', () => {
         fingerprint: 'epub-fingerprint',
         lastOpenedAtMs: 2,
         available: true,
+        groupId: null,
+        coverKey: null,
       },
       {
         path: 'C:\\并行.txt',
@@ -283,12 +379,16 @@ describe('EPUB and TXT workspace tabs', () => {
         fingerprint: null,
         lastOpenedAtMs: 1,
         available: true,
+        groupId: null,
+        coverKey: null,
       },
-    ]);
+      ],
+      groups: [],
+    });
     render(App);
 
-    await fireEvent.click(await screen.findByRole('button', { name: '书库' }));
-    expect(await screen.findByRole('heading', { name: '书库' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '我的书库' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '测试 EPUB' })).toBeTruthy();
     await fireEvent.input(screen.getByLabelText('搜索书库'), { target: { value: '作者' } });
     expect(screen.getByRole('heading', { name: '测试 EPUB' })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: '并行.txt' })).toBeNull();
@@ -307,7 +407,7 @@ describe('EPUB and TXT workspace tabs', () => {
     await fireEvent.click(screen.getByText('打开文件'));
     await waitFor(() => expect(container.querySelector('.cm-content')?.textContent).toBe(openedText.content));
     await fireEvent.click(screen.getByRole('button', { name: '书库' }));
-    expect(await screen.findByRole('heading', { name: '书库' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '我的书库' })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: '阅读与编辑' }));
 
     await waitFor(() => expect(container.querySelector('.cm-content')?.textContent).toBe(openedText.content));
@@ -325,6 +425,21 @@ describe('EPUB and TXT workspace tabs', () => {
 
     expect(await screen.findByRole('button', { name: '第 1 行 序章 起点' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '第 3 行 第十二章 风起' })).toBeTruthy();
+  });
+
+  it('restores the persisted TXT reading position without stealing focus', async () => {
+    vi.mocked(openTextDocument).mockResolvedValueOnce({
+      ...openedText,
+      content: '开头\n恢复位置\n末尾',
+      initialCharacterOffset: 3,
+    });
+    fixtures.chooseDocumentFile.mockResolvedValueOnce('C:\\并行.txt');
+    const { container } = render(App);
+
+    await fireEvent.click(screen.getByText('打开文件'));
+
+    await waitFor(() => expect(container.querySelector('[aria-current="location"]')?.textContent).toBe('恢复位置'));
+    expect(document.activeElement?.getAttribute('aria-label')).not.toBe('TXT 文本编辑器');
   });
 
   it('searches the active TXT document and persists a bookmark at the current cursor', async () => {
@@ -359,11 +474,11 @@ describe('EPUB and TXT workspace tabs', () => {
     })).toBeTruthy();
   });
 
-  it('collapses and expands both side regions while keeping the document workspace', async () => {
+  it('collapses and expands the navigation while settings uses the document region', async () => {
     const { container } = render(App);
 
     expect(screen.getByRole('complementary', { name: '主导航' })).toBeTruthy();
-    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+    expect(screen.queryByRole('region', { name: '设置' })).toBeNull();
 
     await fireEvent.click(screen.getByRole('button', { name: '收起左侧栏' }));
     expect(screen.queryByRole('complementary', { name: '主导航' })).toBeNull();
@@ -376,11 +491,11 @@ describe('EPUB and TXT workspace tabs', () => {
     expect(screen.getByRole('complementary', { name: '主导航' })).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-    expect(screen.getByRole('complementary', { name: '设置' })).toBeTruthy();
-    expect((container.querySelector('.right-divider') as HTMLElement).style.gridColumn).toBe('4');
-    expect((container.querySelector('.inspector-slot') as HTMLElement).style.gridColumn).toBe('5');
-    await fireEvent.click(screen.getAllByRole('button', { name: '关闭设置' }).at(-1)!);
-    expect(screen.queryByRole('complementary', { name: '设置' })).toBeNull();
+    expect(await screen.findByRole('region', { name: '设置' })).toBeTruthy();
+    expect(container.querySelector('.right-divider')).toBeNull();
+    expect(container.querySelector('.inspector-slot')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: '关闭设置' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: '设置' })).toBeNull());
   });
 
   it('resizes the document region from accessible pane separators', async () => {

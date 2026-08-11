@@ -95,6 +95,8 @@ pub(crate) struct EpubLocator {
     pub fragment: Option<String>,
     pub progression_in_chapter: f32,
     pub character_offset: Option<usize>,
+    #[serde(default)]
+    pub paragraph_index: Option<usize>,
 }
 
 impl EpubLocator {

@@ -12,6 +12,22 @@ _Avoid_: File, editor buffer
 The format family that determines a document's model and capabilities. The supported kinds are TXT and EPUB.
 _Avoid_: Extension, mode
 
+**Library Entry**:
+A durable local collection record for a Document. Opening a document adds or refreshes its Library Entry, while removing the entry does not delete the source document or its Recent Document History.
+_Avoid_: Recent file, open tab
+
+**Library Cover Resource**:
+An EPUB cover referenced by an opaque Library Entry key and served through Readloom's validated, read-only cover protocol. It never grants general local-file access.
+_Avoid_: Local file URL, embedded full-library image data
+
+**Library Group**:
+A user-named shelf that optionally owns Library Entries for display and filtering. Deleting a Library Group returns its entries to the ungrouped shelf.
+_Avoid_: Folder, filesystem directory
+
+**Recent Document History**:
+Internal recency metadata updated whenever a Document is opened. It is stored independently from Library Entries and is not presented as a removable navigation panel.
+_Avoid_: Library, collection
+
 **Document Capabilities**:
 The format-independent description of which user operations a document supports, including reading, editing, saving, searching, chapters, and bookmarks.
 _Avoid_: Feature flags, extension checks
@@ -67,3 +83,35 @@ _Avoid_: EPUB chapter, parsed document section
 **Workspace Pane**:
 A collapsible and resizable supporting region beside the document body, such as navigation or document information.
 _Avoid_: Fixed sidebar, document content
+
+**TXT Reading Locator**:
+A persisted first-visible character offset and line number used to restore a TXT Document near the last reading position. It is clamped when the source text becomes shorter.
+_Avoid_: Cursor selection, bookmark
+
+**Application Background**:
+A user-selected PNG, JPEG, or WebP copied into Readloom's application-data directory and served only by opaque key through a validated read-only image protocol.
+_Avoid_: Local file URL, arbitrary CSS URL
+
+**Window Close Action**:
+The user preference that chooses whether a clean close request exits Readloom or hides the main window while keeping it available from the system tray. Unsaved-change safeguards remain authoritative.
+_Avoid_: Forced process exit, background service
+
+**Reading Typography**:
+The shared presentation settings for font fallback, relative paragraph spacing, content width, margins, alignment, and columns. TXT structure preprocessing and individual EPUB body-style overrides remain separate options beneath this model.
+_Avoid_: Whole-document CSS replacement, page-number state
+
+**TXT Reading Paragraph**:
+A display-layer paragraph recognized from source blank lines, headings, and optionally conservative hard-wrap merging. It retains source character offsets so formatting changes do not replace the stable reading locator.
+_Avoid_: Treating every newline as a paragraph, destructive text cleanup
+
+**TXT Reading Window**:
+The bounded set of at most 600 TXT Reading Paragraphs currently represented in the DOM. Estimated block offsets preserve the full scroll range, while binary source/scroll lookup moves the window for reading, search, and locator restoration. After each window move, rendered block geometry corrects estimation drift so the viewport cannot remain inside an empty spacer.
+_Avoid_: Rendering the full TXT as DOM, querying every paragraph during scroll
+
+**Library Import Preview**:
+A read-only scan result shown before any library mutation, including each supported document's name, kind, byte size, canonical location, and whether it already belongs to the Library. Only the user's checked importable candidates become Library Entries.
+_Avoid_: Import-on-directory-selection, hidden bulk mutation
+
+**Content Backup**:
+A versioned `.readloom-backup` archive containing deduplicated TXT and EPUB bytes plus a minimal integrity manifest. It intentionally excludes source paths, bookmarks, reading locators, groups, settings, and history.
+_Avoid_: Full application backup, state synchronization
