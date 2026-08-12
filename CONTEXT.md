@@ -80,13 +80,17 @@ _Avoid_: Extracted publication, rewritten book tree
 A line recognized from TXT chapter-title syntax and exposed as a navigable outline entry without modifying the document text.
 _Avoid_: EPUB chapter, parsed document section
 
+**TXT Chapter**:
+A logical reading section that starts at a TXT Heading and continues until the next TXT Heading. Text before the first heading belongs to an implicit opening chapter.
+_Avoid_: Spine Item, filesystem section
+
 **Workspace Pane**:
 A collapsible and resizable supporting region beside the document body, such as navigation or document information.
 _Avoid_: Fixed sidebar, document content
 
 **TXT Reading Locator**:
-A persisted first-visible character offset and line number used to restore a TXT Document near the last reading position. It is clamped when the source text becomes shorter.
-_Avoid_: Cursor selection, bookmark
+A versioned source anchor containing chapter, reading-paragraph, and intra-paragraph positions plus an absolute character and line fallback. It resolves to the nearest surviving reading paragraph when the source text changes.
+_Avoid_: Scroll offset, cursor selection, bookmark
 
 **Application Background**:
 A user-selected PNG, JPEG, or WebP copied into Readloom's application-data directory and served only by opaque key through a validated read-only image protocol.
@@ -105,8 +109,20 @@ A display-layer paragraph recognized from source blank lines, headings, and opti
 _Avoid_: Treating every newline as a paragraph, destructive text cleanup
 
 **TXT Reading Window**:
-The bounded set of at most 600 TXT Reading Paragraphs currently represented in the DOM. Estimated block offsets preserve the full scroll range, while binary source/scroll lookup moves the window for reading, search, and locator restoration. After each window move, rendered block geometry corrects estimation drift so the viewport cannot remain inside an empty spacer.
-_Avoid_: Rendering the full TXT as DOM, querying every paragraph during scroll
+The bounded presentation window around the current TXT Reading Locator. Its estimated position may seed a jump, but rendered geometry remains authoritative and corrects estimation drift.
+_Avoid_: Full-document visual tree, persisted pixel position
+
+**Document Layout Model**:
+A closed, normalized vocabulary of document blocks, inline marks, images, links, and approved presentation hints produced from validated source resources. It is the only publication structure a native presentation adapter may render or edit.
+_Avoid_: Arbitrary HTML, publisher DOM, unrestricted CSS model
+
+**TXT Save Snapshot**:
+The source encoding, BOM state, detected and primary line endings, and file fingerprint captured when a TXT Document is opened. A native save preserves this snapshot by default and refuses to overwrite a changed source.
+_Avoid_: Blind overwrite, replacement-character encoding
+
+**Native Reading Layout**:
+The headings, visible text paragraphs, and validated image resources emitted by `readloom-core` for TXT or EPUB and consumed by Slint. EPUB HTML, CSS, scripts, and unrestricted archive resources do not cross this interface.
+_Avoid_: Web view document, publisher markup
 
 **Library Import Preview**:
 A read-only scan result shown before any library mutation, including each supported document's name, kind, byte size, canonical location, and whether it already belongs to the Library. Only the user's checked importable candidates become Library Entries.

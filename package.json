@@ -12,7 +12,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "verify:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1"
+    "verify:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1",
+    "slint:check": "cargo check -p readloom-slint",
+    "slint:run": "cargo run -p readloom-slint",
+    "slint:build": "cargo build -p readloom-slint --release",
+    "slint:verify": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-slint-stage1.ps1"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

@@ -1,0 +1,2585 @@
+import { LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct LibraryBook {
+    title: string,
+    subtitle: string,
+    path: string,
+    kind: string,
+    available: bool,
+    group-index: int,
+    group-name: string,
+    cover: image,
+    has-cover: bool,
+}
+
+export struct LibraryBookRow {
+    first: LibraryBook,
+    second: LibraryBook,
+    third: LibraryBook,
+    fourth: LibraryBook,
+    fifth: LibraryBook,
+    has-second: bool,
+    has-third: bool,
+    has-fourth: bool,
+    has-fifth: bool,
+}
+
+export struct LibraryShelf {
+    id: string,
+    name: string,
+    count: int,
+}
+
+export struct ChapterItem {
+    title: string,
+    chapter-index: int,
+    paragraph-index: int,
+    line-number: int,
+}
+
+export struct ParagraphItem {
+    text: string,
+    kind: string,
+    index: int,
+    chapter-index: int,
+    image: image,
+    has-image: bool,
+}
+
+export struct ParagraphRow {
+    first: ParagraphItem,
+    second: ParagraphItem,
+    has-second: bool,
+}
+
+export struct SearchItem {
+    label: string,
+    preview: string,
+    chapter-index: int,
+    paragraph-index: int,
+}
+
+export struct BookmarkItem {
+    id: string,
+    label: string,
+    detail: string,
+    chapter-index: int,
+    paragraph-index: int,
+}
+
+export struct OpenDocumentTab {
+    title: string,
+    path: string,
+    kind: string,
+    active: bool,
+}
+
+component VectorIcon inherits Rectangle {
+    in property <string> name;
+    in property <color> icon-color: #404650;
+    background: transparent;
+
+    Path {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.name == "library"
+            ? "M4 4 H8 V20 H4 Z M10 4 H14 V20 H10 Z M16 6 L19.5 5 L22.5 18 L19 19 Z"
+            : root.name == "document"
+                ? "M6 2 H14 L18 6 V22 H6 Z M14 2 V7 H18 M9 12 H15 M9 16 H15"
+                : "M12 8.5 A3.5 3.5 0 1 0 12 15.5 A3.5 3.5 0 1 0 12 8.5 M12 3 V5 M12 19 V21 M3 12 H5 M19 12 H21 M5.6 5.6 L7 7 M17 17 L18.4 18.4 M18.4 5.6 L17 7 M7 17 L5.6 18.4";
+        fill: transparent;
+        stroke: root.icon-color;
+        stroke-width: 1.7px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+}
+
+component IconSlot inherits Rectangle {
+    in property <string> name;
+    in property <color> icon-color: #404650;
+    in property <length> icon-size: 18px;
+    background: transparent;
+
+    VectorIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        name: root.name;
+        icon-color: root.icon-color;
+    }
+}
+
+component StatusDotSlot inherits Rectangle {
+    in property <color> dot-color: #238636;
+    background: transparent;
+
+    Rectangle {
+        x: (parent.width - 7px) / 2;
+        y: (parent.height - 7px) / 2;
+        width: 7px;
+        height: 7px;
+        border-radius: 4px;
+        background: root.dot-color;
+    }
+}
+
+component BrandContent inherits Rectangle {
+    background: transparent;
+
+    HorizontalLayout {
+        padding-left: 17px;
+        padding-right: 14px;
+        spacing: 9px;
+        Rectangle {
+            width: 23px;
+            background: transparent;
+            Rectangle {
+                y: (parent.height - 23px) / 2;
+                width: 23px;
+                height: 23px;
+                border-radius: 5px;
+                background: #171a20;
+                Text {
+                    text: "R";
+                    color: #ffffff;
+                    font-family: "Cascadia Mono";
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Text {
+            text: "Readloom";
+            color: #171a20;
+            font-size: 14px;
+            font-weight: 650;
+            vertical-alignment: center;
+        }
+        Text {
+            text: "阅织";
+            color: #6d7582;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 34px;
+    min-width: 58px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.primary ? #315fc4 : #c9ced7;
+    background: !root.enabled
+        ? #f5f6f8
+        : root.primary
+            ? (button-touch.has-hover ? #214ea9 : #315fc4)
+            : (button-touch.has-hover ? #eceff3 : #ffffff);
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? #9ba2ad : root.primary ? #ffffff : #404650;
+        font-size: 11px;
+        font-weight: 650;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    button-touch := TouchArea {
+        enabled: root.enabled;
+        accessible-role: button;
+        accessible-label: root.text;
+        clicked => { root.clicked(); }
+    }
+}
+
+component DocumentTabButton inherits Rectangle {
+    in property <OpenDocumentTab> tab;
+    callback selected();
+    callback closed();
+    width: 174px;
+    height: 34px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.tab.active ? #9ab3e7 : #dde1e7;
+    background: root.tab.active ? #eaf1ff : tab-touch.has-hover ? #eceff3 : #ffffff;
+    tab-touch := TouchArea { accessible-role: button; accessible-label: root.tab.title; clicked => { root.selected(); } }
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 5px;
+        spacing: 5px;
+        Text { width: 34px; text: root.tab.kind; color: root.tab.active ? #214ea9 : #9ba2ad; font-family: "Cascadia Mono"; font-size: 8px; font-weight: 700; vertical-alignment: center; }
+        Text { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; text: root.tab.title; color: #404650; font-size: 11px; font-weight: root.tab.active ? 680 : 560; overflow: elide; vertical-alignment: center; }
+        Rectangle {
+            width: 26px;
+            height: 24px;
+            border-radius: 5px;
+            background: close-touch.has-hover ? #dfe6f4 : transparent;
+            Text { text: "×"; color: #6d7582; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+            close-touch := TouchArea { accessible-role: button; accessible-label: "关闭图书"; clicked => { root.closed(); } }
+        }
+    }
+}
+
+component SettingValueButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 34px;
+    min-width: 68px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #c9ced7;
+    background: value-touch.has-hover ? #eaf1ff : #ffffff;
+    Text {
+        text: root.text;
+        color: #214ea9;
+        font-size: 11px;
+        font-weight: 650;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    value-touch := TouchArea {
+        accessible-role: button;
+        accessible-label: root.text;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SettingSwitch inherits Rectangle {
+    in property <bool> active;
+    callback toggled();
+    width: 42px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.active ? #315fc4 : #c9ced7;
+    Rectangle {
+        x: root.active ? 20px : 2px;
+        y: 2px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: #ffffff;
+    }
+    TouchArea {
+        accessible-role: button;
+        accessible-label: root.active ? "已开启" : "已关闭";
+        clicked => { root.toggled(); }
+    }
+}
+
+component StepSettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> decrease-text: "−";
+    in property <string> increase-text: "+";
+    callback decrease();
+    callback increase();
+
+    height: 38px;
+    border-radius: 6px;
+    background: #ffffff;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text { width: 112px; text: root.label; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; }
+        Text { width: 86px; text: root.value; color: #171a20; font-size: 11px; font-weight: 680; horizontal-alignment: right; vertical-alignment: center; }
+        Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+        SettingValueButton { width: 48px; height: 30px; text: root.decrease-text; clicked => { root.decrease(); } }
+        SettingValueButton { width: 48px; height: 30px; text: root.increase-text; clicked => { root.increase(); } }
+    }
+}
+
+component ToggleSettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> description: "";
+    in property <bool> active;
+    callback toggled();
+
+    height: 42px;
+    border-radius: 6px;
+    background: #ffffff;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            spacing: 1px;
+            Text { text: root.label; color: #404650; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+            if root.description != "" : Text { text: root.description; color: #8a929e; font-size: 9px; vertical-alignment: center; }
+        }
+        SettingSwitch { active: root.active; toggled => { root.toggled(); } }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 38px;
+    border-radius: 7px;
+    background: root.active ? #eaf1ff : nav-touch.has-hover && root.enabled ? #eceff3 : transparent;
+
+    if root.active : Rectangle {
+        x: 0;
+        y: 8px;
+        width: 3px;
+        height: parent.height - 16px;
+        border-radius: 2px;
+        background: #315fc4;
+    }
+
+    HorizontalLayout {
+        padding-left: 42px;
+        padding-right: 10px;
+        spacing: 10px;
+        alignment: start;
+
+        IconSlot {
+            width: 19px;
+            name: root.icon;
+            icon-size: 19px;
+            icon-color: !root.enabled ? #9ba2ad : root.active ? #214ea9 : #59616d;
+        }
+        Text {
+            width: 112px;
+            text: root.label;
+            color: !root.enabled ? #9ba2ad : root.active ? #214ea9 : #404650;
+            font-size: 13px;
+            font-weight: root.active ? 650 : 520;
+            vertical-alignment: center;
+        }
+    }
+
+    nav-touch := TouchArea {
+        enabled: root.enabled;
+        accessible-role: button;
+        accessible-label: root.label;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SettingsGroupLabel inherits Rectangle {
+    in property <string> label;
+    in property <bool> dark: false;
+
+    height: 22px;
+    background: transparent;
+
+    Text {
+        x: 2px;
+        width: parent.width - 4px;
+        text: root.label;
+        color: root.dark ? #9da5b2 : #747c89;
+        font-size: 10px;
+        font-weight: 520;
+        vertical-alignment: center;
+    }
+}
+
+component SettingsPageItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> dark: false;
+    callback clicked();
+
+    height: 34px;
+    border-radius: 8px;
+    background: root.active
+        ? (root.dark ? #27395f : #e7efff)
+        : page-touch.has-hover ? (root.dark ? #2b3039 : #eceff3) : transparent;
+
+    if root.active : Rectangle {
+        x: 0px;
+        y: 4px;
+        width: 3px;
+        height: parent.height - 8px;
+        border-radius: 2px;
+        background: #315fc4;
+    }
+
+    Text {
+        x: 13px;
+        width: parent.width - 23px;
+        text: root.label;
+        color: root.active ? (root.dark ? #8fb1ff : #214ea9) : (root.dark ? #d4d8df : #4e5561);
+        font-size: 12px;
+        font-weight: root.active ? 680 : 580;
+        vertical-alignment: center;
+    }
+
+    page-touch := TouchArea {
+        accessible-role: button;
+        accessible-label: root.label;
+        clicked => { root.clicked(); }
+    }
+}
+
+component WorkspaceGroupRow inherits Rectangle {
+    in property <LibraryShelf> shelf;
+    in property <bool> active;
+    in property <bool> can-move-up;
+    in property <bool> can-move-down;
+    callback selected();
+    callback move(int);
+
+    height: 34px;
+    border-radius: 6px;
+    background: root.active ? #e7eefc : group-touch.has-hover ? #eceff3 : transparent;
+    group-touch := TouchArea { accessible-role: button; accessible-label: root.shelf.name; clicked => { root.selected(); } }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 5px;
+        spacing: 4px;
+        Text { width: 12px; text: "•"; color: root.active ? #315fc4 : #9ba2ad; font-size: 13px; vertical-alignment: center; }
+        Text { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; text: root.shelf.name; color: root.active ? #214ea9 : #4e5561; font-size: 11px; font-weight: root.active ? 680 : 560; overflow: elide; vertical-alignment: center; }
+        Text { width: 22px; text: root.shelf.count; color: #9ba2ad; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+        if root.shelf.id != "ungrouped" : SettingValueButton { width: 24px; height: 24px; text: root.can-move-up ? "↑" : ""; clicked => { if (root.can-move-up) { root.move(-1); } } }
+        if root.shelf.id != "ungrouped" : SettingValueButton { width: 24px; height: 24px; text: root.can-move-down ? "↓" : ""; clicked => { if (root.can-move-down) { root.move(1); } } }
+    }
+}
+
+component NavigationPane inherits Rectangle {
+    in property <bool> reader-open;
+    in property <bool> settings-open;
+    in property <[LibraryShelf]> shelves;
+    in property <string> selected-group-id: "all";
+    in-out property <bool> groups-expanded: false;
+    callback show-library();
+    callback show-reader();
+    callback show-settings();
+    callback open-file();
+    callback select-group(string, string, int);
+    callback move-group(string, int);
+
+    width: 220px;
+    background: #f7f8fa;
+    border-color: #dde1e7;
+    border-width: 0px;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 66px;
+            border-color: #dde1e7;
+            border-width: 0px;
+            if !root.reader-open : ActionButton {
+                x: 10px;
+                y: 11px;
+                width: parent.width - 20px;
+                height: 42px;
+                text: "打开文件";
+                primary: true;
+                clicked => { root.open-file(); }
+            }
+            if root.reader-open : ActionButton {
+                x: 10px;
+                y: 11px;
+                width: parent.width - 20px;
+                height: 42px;
+                text: "打开文件";
+                primary: true;
+                clicked => { root.open-file(); }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #dde1e7;
+        }
+
+        Rectangle {
+            min-height: 0px;
+            preferred-height: 0px;
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 22px;
+                spacing: 4px;
+
+                Text {
+                    height: 25px;
+                    text: "工作区";
+                    color: #6d7582;
+                    font-size: 11px;
+                    font-weight: 650;
+                    vertical-alignment: center;
+                }
+                NavItem {
+                    label: "书库";
+                    icon: "library";
+                    active: !root.reader-open && !root.settings-open;
+                    clicked => { root.show-library(); }
+                }
+                Text { height: 22px; text: "书库分组"; color: #9ba2ad; font-size: 9px; font-weight: 650; vertical-alignment: center; }
+                for shelf[index] in root.shelves : WorkspaceGroupRow {
+                    visible: index == 1 || (index >= 2 && (index < 7 || root.groups-expanded));
+                    height: self.visible ? 34px : 0px;
+                    shelf: shelf;
+                    active: root.selected-group-id == shelf.id && !root.reader-open && !root.settings-open;
+                    can-move-up: index > 2;
+                    can-move-down: index + 1 < root.shelves.length;
+                    selected => { root.select-group(shelf.id, shelf.name, index); }
+                    move(direction) => { root.move-group(shelf.id, direction); }
+                }
+                if root.shelves.length > 7 : SettingValueButton {
+                    height: 28px;
+                    text: root.groups-expanded ? "收起分组" : "展开更多（" + (root.shelves.length - 7) + "）";
+                    clicked => { root.groups-expanded = !root.groups-expanded; }
+                }
+                NavItem {
+                    label: "阅读与编辑";
+                    icon: "document";
+                    active: root.reader-open && !root.settings-open;
+                    clicked => { root.show-reader(); }
+                }
+                NavItem {
+                    label: "设置";
+                    icon: "settings";
+                    active: root.settings-open;
+                    clicked => { root.show-settings(); }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 45px;
+            border-color: #dde1e7;
+            border-width: 0px;
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 9px;
+                alignment: center;
+                StatusDotSlot {
+                    width: 7px;
+                }
+                Text {
+                    text: "本地优先";
+                    color: #6d7582;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component BookCard inherits Rectangle {
+    in property <LibraryBook> book;
+    in property <[LibraryShelf]> shelves;
+    callback open(string);
+    callback remove(string, string);
+    callback move-to-group(string, string, string);
+
+    height: 430px;
+    min-width: 188px;
+    preferred-width: 248px;
+    max-width: 280px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: card-touch.has-hover && root.book.available ? #9ab3e7 : #dde1e7;
+    background: card-touch.has-hover && root.book.available ? #ffffff : #f7f8fa;
+
+    card-touch := TouchArea {
+        enabled: root.book.available;
+        accessible-role: list-item;
+        accessible-label: root.book.title;
+        clicked => { root.open(root.book.path); }
+    }
+
+    VerticalLayout {
+        padding: 13px;
+        spacing: 8px;
+
+        Rectangle {
+            height: 220px;
+            background: transparent;
+            if root.book.has-cover : Image {
+                x: (parent.width - self.width) / 2;
+                width: 146px;
+                height: 220px;
+                source: root.book.cover;
+                image-fit: cover;
+            }
+            if !root.book.has-cover : Rectangle {
+                x: (parent.width - self.width) / 2;
+                width: 146px;
+                height: 220px;
+                border-radius: 5px;
+                background: root.book.kind == "EPUB"
+                    ? @linear-gradient(145deg, #315fc4, #173b83)
+                    : @linear-gradient(145deg, #343941, #111318);
+                border-color: #272b31;
+                border-width: 1px;
+
+                Rectangle {
+                    x: 5px;
+                    width: 2px;
+                    height: parent.height;
+                    background: #ffffff18;
+                }
+                Text {
+                    x: 13px;
+                    y: 13px;
+                    text: root.book.kind;
+                    color: #ffffffb8;
+                    font-family: "Cascadia Mono";
+                    font-size: 8px;
+                    font-weight: 700;
+                    letter-spacing: 1px;
+                }
+                Text {
+                    x: 14px;
+                    y: 48px;
+                    width: parent.width - 28px;
+                    height: 116px;
+                    text: root.book.title;
+                    color: #ffffff;
+                    font-size: 18px;
+                    font-weight: 720;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 14px;
+                    y: parent.height - 27px;
+                    text: "READLOOM";
+                    color: #ffffff9a;
+                    font-family: "Cascadia Mono";
+                    font-size: 7px;
+                    font-weight: 700;
+                    letter-spacing: 1.2px;
+                }
+            }
+        }
+
+        Text {
+            height: 15px;
+            text: (root.book.kind == "EPUB" ? "电子书" : "文本书籍") + " · " + root.book.group-name;
+            color: root.book.available ? #214ea9 : #c23b3b;
+            font-size: 9px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        Text {
+            height: 24px;
+            text: root.book.title;
+            color: root.book.available ? #171a20 : #9ba2ad;
+            font-size: 15px;
+            font-weight: 670;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            height: 17px;
+            text: root.book.available ? root.book.subtitle : "文件已移动或删除";
+            color: #6d7582;
+            font-size: 10px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+        ActionButton {
+            height: 34px;
+            text: root.book.available ? "打开" : "不可用";
+            primary: true;
+            enabled: root.book.available;
+            clicked => { root.open(root.book.path); }
+        }
+        HorizontalLayout {
+            height: 34px;
+            spacing: 7px;
+            ActionButton {
+                text: "换分组";
+                enabled: root.shelves.length > 2;
+                clicked => {
+                    if (root.shelves.length > 2) {
+                        let next-index = root.book.group-index + 1 >= root.shelves.length ? 1 : root.book.group-index + 1;
+                        root.move-to-group(root.book.path, root.shelves[next-index].id, root.shelves[next-index].name);
+                    }
+                }
+            }
+            ActionButton {
+                text: "移除";
+                clicked => { root.remove(root.book.path, root.book.title); }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Readloom 阅织";
+    icon: @image-url("../crates/readloom-slint/assets/app-icon.png");
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 1040px;
+    min-height: 640px;
+    background: #ffffff;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 14px;
+
+    in property <[LibraryBookRow]> library-book-rows;
+    in property <int> library-book-count: 0;
+    in property <[LibraryShelf]> library-shelves;
+    in property <[ChapterItem]> chapters;
+    in property <[ParagraphItem]> paragraphs;
+    in property <[ParagraphRow]> paragraph-rows;
+    in property <[SearchItem]> search-results;
+    in property <[BookmarkItem]> bookmarks;
+    in property <[OpenDocumentTab]> open-document-tabs;
+    in-out property <bool> reader-open: false;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> remove-confirm-open: false;
+    in-out property <string> remove-confirm-path: "";
+    in-out property <string> remove-confirm-title: "";
+    in-out property <string> library-search-query: "";
+    in-out property <string> library-type-filter: "all";
+    in-out property <string> library-group-filter: "all";
+    in-out property <string> library-group-label: "全部图书";
+    in-out property <int> library-group-filter-index: 0;
+    in-out property <string> library-sort-mode: "recent";
+    in-out property <bool> workspace-groups-expanded: false;
+    in-out property <string> document-title: "";
+    in-out property <string> document-path: "";
+    in-out property <string> document-author: "";
+    in-out property <string> document-kind: "TXT";
+    in-out property <string> edit-content: "";
+    in-out property <bool> edit-mode: false;
+    in-out property <string> document-encoding: "UTF-8";
+    in-out property <string> document-line-ending: "LF";
+    in-out property <string> status-text: "正在连接本地书库…";
+    in-out property <length> workspace-pane-width: 220px;
+    in-out property <length> reader-tools-pane-width: 240px;
+    in-out property <length> settings-navigation-width: 228px;
+    in-out property <length> epub-search-panel-width: 260px;
+    in-out property <bool> pane-resize-preview-active: false;
+    in-out property <string> pane-resize-preview-kind: "";
+    in-out property <float> pane-resize-preview-width: 0;
+    in-out property <length> pane-resize-preview-x: 0px;
+    in-out property <string> reader-side-panel: "";
+    in-out property <bool> new-group-form-open: false;
+    in-out property <string> new-group-name: "";
+    in-out property <int> active-paragraph-index: 0;
+    in-out property <int> active-chapter-index: 0;
+    in-out property <string> active-chapter-title: "";
+    in-out property <int> document-paragraph-count: 0;
+    in-out property <int> reader-window-start: 0;
+    in-out property <int> reader-target-row: 0;
+    in-out property <length> reader-viewport-y: 0px;
+    in-out property <string> settings-section: "reading.typography";
+    in-out property <string> settings-theme: "light";
+    in-out property <string> settings-effective-theme: "light";
+    in-out property <int> settings-library-columns: 4;
+    in-out property <float> settings-background-opacity: 0.2;
+    in-out property <image> settings-background-image;
+    in-out property <bool> settings-has-background: false;
+    in-out property <bool> settings-minimize-to-tray: false;
+    in-out property <string> settings-close-action: "exit";
+    in-out property <string> settings-font-id: "source-han-serif";
+    in-out property <string> settings-font-family: "Microsoft YaHei UI";
+    in-out property <int> settings-font-size: 19;
+    in-out property <int> settings-font-weight: 400;
+    in-out property <float> settings-letter-spacing: 0;
+    in-out property <float> settings-first-line-indent: 2;
+    in-out property <float> settings-line-height: 1.7;
+    in-out property <float> settings-paragraph-spacing: 0.15;
+    in-out property <int> settings-content-width: 780;
+    in-out property <int> settings-horizontal-margin: 40;
+    in-out property <int> settings-vertical-margin: 30;
+    in-out property <string> settings-text-alignment: "justify";
+    in-out property <int> settings-reading-columns: 1;
+    in-out property <string> settings-txt-leading-indent: "clean";
+    in-out property <string> settings-txt-blank-lines: "single";
+    in-out property <bool> settings-merge-wrapped-lines: false;
+    in-out property <string> settings-chapter-title-style: "prominent";
+    in-out property <bool> settings-epub-publisher-styles: true;
+    in-out property <bool> settings-epub-override-font: false;
+    in-out property <bool> settings-epub-override-font-size: true;
+    in-out property <bool> settings-epub-override-indent: false;
+    in-out property <bool> settings-epub-override-line-height: true;
+    in-out property <bool> settings-epub-override-paragraph-spacing: false;
+    in-out property <bool> settings-epub-embedded-fonts: true;
+    in-out property <string> settings-chapter-pattern: "";
+    in-out property <string> settings-pattern-error: "";
+    in-out property <string> settings-backup-path: "";
+    in-out property <string> settings-backup-result: "";
+    in-out property <string> shortcut-open: "";
+    in-out property <string> shortcut-save: "";
+    in-out property <string> shortcut-save-as: "";
+    in-out property <string> shortcut-close: "";
+    in-out property <string> shortcut-toggle-edit: "";
+    in-out property <string> shortcut-previous-chapter: "";
+    in-out property <string> shortcut-next-chapter: "";
+    in-out property <string> shortcut-bookmark: "";
+    in-out property <string> shortcut-show-library: "";
+    in-out property <string> shortcut-show-settings: "";
+
+    callback open-document(string);
+    callback open-file();
+    callback refresh-library();
+    callback remove-library-book(string, string);
+    callback create-library-group(string);
+    callback import-library-files();
+    callback import-library-directory();
+    callback clean-invalid-library-books();
+    callback refresh-library-view();
+    callback move-library-book(string, string, string);
+    callback move-library-group(string, int);
+    callback show-open-documents();
+    callback select-open-document(string);
+    callback close-open-document(string);
+    callback delete-bookmark(string);
+    callback back-to-library();
+    callback search-text(string);
+    callback reading-position-changed(int);
+    callback request-reader-window(int);
+    callback open-epub-location(int, int);
+    callback preview-pane-resize(string, float);
+    callback commit-pane-resize(string, float);
+    callback previous-chapter();
+    callback next-chapter();
+    callback add-bookmark();
+    callback request-edit-mode(bool);
+    callback save-edited-text(string);
+    callback save-edited-text-as(string);
+    callback update-setting(string, string);
+    callback change-setting(string, float);
+    callback choose-background();
+    callback clear-background();
+    callback set-shortcut(string, string);
+    callback clear-shortcuts();
+    callback set-chapter-pattern(string);
+    callback reset-chapter-pattern();
+    callback choose-backup-path();
+    callback create-backup();
+    callback restore-backup();
+    callback restore-backup-directory();
+
+    public function navigate-to(index: int) {
+        let target = root.document-paragraph-count > 0
+            ? Math.max(0, Math.min(index, root.document-paragraph-count - 1))
+            : Math.max(0, index);
+        root.request-reader-window(target);
+        root.active-paragraph-index = target;
+        let local-target = Math.max(0, target - root.reader-window-start);
+        root.reader-viewport-y = -((root.settings-reading-columns == 2 ? root.reader-target-row : local-target) * 58px);
+        root.reading-position-changed(target);
+    }
+
+    function show-library() {
+        root.settings-open = false;
+        if (root.reader-open) {
+            root.back-to-library();
+        }
+    }
+
+    function show-reader() {
+        root.settings-open = false;
+        root.show-open-documents();
+    }
+
+    function show-settings() {
+        root.settings-open = true;
+        root.edit-content = "";
+        root.edit-mode = false;
+        root.status-text = "设置会立即保存到本地数据库。";
+    }
+
+    function open-file-hint() {
+        root.open-file();
+    }
+
+    preview-pane-resize(pane, width) => {
+        root.pane-resize-preview-active = true;
+        root.pane-resize-preview-kind = pane;
+        root.pane-resize-preview-width = width;
+        root.pane-resize-preview-x = pane == "workspace"
+            ? width * 1px
+            : pane == "reader-side"
+                ? root.width - width * 1px - 6px
+                : root.workspace-pane-width + 8px + width * 1px;
+    }
+
+    commit-pane-resize(pane, width) => {
+        if (pane == "workspace") {
+            root.workspace-pane-width = width * 1px;
+        } else if (pane == "reader-tools") {
+            root.reader-tools-pane-width = width * 1px;
+        } else if (pane == "reader-side") {
+            root.epub-search-panel-width = width * 1px;
+        } else if (pane == "settings-navigation") {
+            root.settings-navigation-width = width * 1px;
+        }
+        root.pane-resize-preview-active = false;
+        root.pane-resize-preview-kind = "";
+    }
+
+    function request-remove-book(path: string, title: string) {
+        root.remove-confirm-path = path;
+        root.remove-confirm-title = title;
+        root.remove-confirm-open = true;
+    }
+
+    changed reader-viewport-y => {
+        if (root.reader-open && !root.edit-mode && root.reader-viewport-y <= 0px) {
+            let estimated-row = Math.max(0, Math.round(-root.reader-viewport-y / 58px));
+            let estimated-paragraph = root.settings-reading-columns == 2
+                ? (estimated-row < root.paragraph-rows.length ? root.paragraph-rows[estimated-row].first.index : root.document-paragraph-count - 1)
+                : (estimated-row < root.paragraphs.length ? root.paragraphs[estimated-row].index : root.reader-window-start + root.paragraphs.length - 1);
+            if (estimated-paragraph < root.document-paragraph-count && estimated-paragraph != root.active-paragraph-index) {
+                root.active-paragraph-index = estimated-paragraph;
+                root.reading-position-changed(estimated-paragraph);
+            }
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #ffffff;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 48px;
+            background: #fafbfc;
+            border-color: #dde1e7;
+            border-width: 0px;
+
+            HorizontalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    width: root.workspace-pane-width;
+                    background: #fafbfc;
+                    border-color: #dde1e7;
+                    border-width: 0px;
+                    if !root.reader-open : BrandContent { }
+                    if root.reader-open : BrandContent { }
+                }
+
+                Rectangle {
+                    width: root.settings-open ? 182px : root.reader-open ? 330px : 182px;
+                    background: #ffffff;
+                    border-color: #dde1e7;
+                    border-width: 0px;
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        alignment: center;
+                        IconSlot {
+                            width: 16px;
+                            name: root.settings-open ? "settings" : root.reader-open ? "document" : "library";
+                            icon-size: 16px;
+                            icon-color: #214ea9;
+                        }
+                        if root.reader-open && !root.settings-open : Text {
+                            width: 24px;
+                            text: root.document-kind;
+                            color: #9ba2ad;
+                            font-family: "Cascadia Mono";
+                            font-size: 8px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.settings-open ? "设置" : root.reader-open ? root.document-title : "我的书库";
+                            color: #214ea9;
+                            font-size: 13px;
+                            font-weight: 650;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        if root.reader-open && !root.settings-open : Rectangle {
+                            width: 24px;
+                            close-tab-touch := TouchArea {
+                                accessible-role: button;
+                                accessible-label: "关闭文档";
+                                clicked => { root.back-to-library(); }
+                            }
+                            Rectangle {
+                                y: (parent.height - 24px) / 2;
+                                width: 24px;
+                                height: 24px;
+                                border-radius: 5px;
+                                background: close-tab-touch.has-hover ? #eceff3 : transparent;
+                                Text {
+                                    text: "×";
+                                    color: #6d7582;
+                                    font-size: 17px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        y: parent.height - 2px;
+                        width: parent.width;
+                        height: 2px;
+                        background: #315fc4;
+                    }
+                }
+
+                Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: #fafbfc; }
+
+                Rectangle {
+                    width: 92px;
+                    background: settings-touch.has-hover ? #eceff3 : #fafbfc;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 7px;
+                        alignment: center;
+                        IconSlot {
+                            width: 17px;
+                            name: "settings";
+                            icon-size: 17px;
+                        }
+                        Text {
+                            text: "设置";
+                            color: #404650;
+                            font-size: 11px;
+                            font-weight: 650;
+                            vertical-alignment: center;
+                        }
+                    }
+                    settings-touch := TouchArea {
+                        accessible-role: button;
+                        accessible-label: "设置";
+                        clicked => { root.show-settings(); }
+                    }
+                }
+
+                Rectangle {
+                    width: 132px;
+                    background: #fafbfc;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 7px;
+                        alignment: center;
+                        StatusDotSlot {
+                            width: 7px;
+                        }
+                        Text {
+                            text: "Rust 已连接";
+                            color: #6d7582;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: #dde1e7;
+            }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 48px;
+            width: parent.width;
+            height: parent.height - 75px;
+            background: #ffffff;
+
+            NavigationPane {
+                x: 0px;
+                y: 0px;
+                width: root.workspace-pane-width;
+                height: parent.height;
+                reader-open: root.reader-open;
+                settings-open: root.settings-open;
+                shelves: root.library-shelves;
+                selected-group-id: root.library-group-filter;
+                groups-expanded <=> root.workspace-groups-expanded;
+                show-library => { root.show-library(); }
+                show-reader => { root.show-reader(); }
+                show-settings => { root.show-settings(); }
+                open-file => { root.open-file-hint(); }
+                select-group(id, name, index) => {
+                    root.library-group-filter = id;
+                    root.library-group-label = name;
+                    root.library-group-filter-index = index;
+                    root.show-library();
+                    root.refresh-library-view();
+                }
+                move-group(id, direction) => { root.move-library-group(id, direction); }
+            }
+
+            Rectangle {
+                x: root.workspace-pane-width;
+                y: 0px;
+                width: 8px;
+                height: parent.height;
+                background: #fafbfc;
+                workspace-resize := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: col-resize;
+                    moved => {
+                        if (self.pressed) {
+                            root.preview-pane-resize("workspace", Math.max(168px, Math.min(360px, self.absolute-position.x + self.mouse-x)) / 1px);
+                        }
+                    }
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.up && root.pane-resize-preview-kind == "workspace") {
+                            root.commit-pane-resize("workspace", root.pane-resize-preview-width);
+                        } else if (event.kind == PointerEventKind.cancel && root.pane-resize-preview-kind == "workspace") {
+                            root.pane-resize-preview-active = false;
+                            root.pane-resize-preview-kind = "";
+                        }
+                    }
+                }
+                Rectangle {
+                    x: -10px;
+                    y: 12px;
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 15px;
+                    border-width: 1px;
+                    border-color: #c9ced7;
+                    background: #ffffff;
+                    Text {
+                        text: "‹";
+                        color: #6d7582;
+                        font-size: 18px;
+                        font-weight: 650;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if !root.reader-open && !root.settings-open : Rectangle {
+                x: root.workspace-pane-width + 8px;
+                y: 0px;
+                width: parent.width - root.workspace-pane-width - 8px;
+                height: parent.height;
+                background: #ffffff;
+
+                VerticalLayout {
+                    x: parent.width > 1240px ? (parent.width - 1240px) / 2 : 0px;
+                    width: Math.min(parent.width, 1240px);
+                    height: parent.height;
+                    padding-left: 30px;
+                    padding-right: 30px;
+                    padding-top: 28px;
+                    padding-bottom: 18px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        height: 68px;
+                        spacing: 18px;
+                        VerticalLayout {
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text {
+                                text: "我的书库";
+                                color: #171a20;
+                                font-size: 31px;
+                                font-weight: 740;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "整理本机 EPUB 与文本书籍，打开记录与书库收藏彼此独立。";
+                                color: #6d7582;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        ActionButton { width: 60px; text: "刷新"; clicked => { root.refresh-library(); } }
+                        ActionButton { width: 78px; text: "新建分组"; clicked => { root.new-group-form-open = !root.new-group-form-open; } }
+                        ActionButton { width: 78px; text: "导入目录"; clicked => { root.import-library-directory(); } }
+                        ActionButton {
+                            width: 78px;
+                            text: "导入图书";
+                            primary: true;
+                            clicked => { root.import-library-files(); }
+                        }
+                        ActionButton { width: 88px; text: "清理无效"; clicked => { root.clean-invalid-library-books(); } }
+                    }
+
+                    if root.new-group-form-open : Rectangle {
+                        height: 58px;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #c9d7f5;
+                        background: #f8faff;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+                            spacing: 8px;
+                            Text { width: 76px; text: "分组名称"; color: #404650; font-size: 11px; font-weight: 650; vertical-alignment: center; }
+                            LineEdit { text <=> root.new-group-name; placeholder-text: "例如：小说书架"; accepted(text) => { if (text != "") { root.create-library-group(text); root.new-group-name = ""; root.new-group-form-open = false; } } }
+                            ActionButton { width: 72px; text: "创建"; primary: true; enabled: root.new-group-name != ""; clicked => { root.create-library-group(root.new-group-name); root.new-group-name = ""; root.new-group-form-open = false; } }
+                            ActionButton { width: 64px; text: "取消"; clicked => { root.new-group-name = ""; root.new-group-form-open = false; } }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 82px;
+                        border-radius: 11px;
+                        border-width: 1px;
+                        border-color: #dde1e7;
+                        background: #f7f8fa;
+
+                        HorizontalLayout {
+                            padding: 12px;
+                            spacing: 14px;
+                            VerticalLayout {
+                                min-width: 0px;
+                                preferred-width: 0px;
+                                horizontal-stretch: 1;
+                                spacing: 5px;
+                                Text {
+                                    height: 14px;
+                                    text: "搜索书库";
+                                    color: #6d7582;
+                                    font-size: 9px;
+                                    font-weight: 650;
+                                }
+                                LineEdit {
+                                    accessible-id: "library-search";
+                                    placeholder-text: "书名、作者或路径";
+                                    text <=> root.library-search-query;
+                                    edited(text) => {
+                                        root.library-search-query = text;
+                                        root.refresh-library-view();
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: 252px;
+                                background: transparent;
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    Text {
+                                        height: 14px;
+                                        text: "类型";
+                                        color: #6d7582;
+                                        font-size: 9px;
+                                        font-weight: 650;
+                                    }
+                                    Rectangle {
+                                        height: 36px;
+                                        border-radius: 7px;
+                                        background: #f1f3f6;
+                                        HorizontalLayout {
+                                            padding: 3px;
+                                            spacing: 2px;
+                                            SettingValueButton { width: 50px; height: 30px; text: root.library-type-filter == "all" ? "[全部]" : "全部"; clicked => { root.library-type-filter = "all"; root.refresh-library-view(); } }
+                                            SettingValueButton { width: 58px; height: 30px; text: root.library-type-filter == "epub" ? "[EPUB]" : "EPUB"; clicked => { root.library-type-filter = "epub"; root.refresh-library-view(); } }
+                                            SettingValueButton { width: 50px; height: 30px; text: root.library-type-filter == "txt" ? "[TXT]" : "TXT"; clicked => { root.library-type-filter = "txt"; root.refresh-library-view(); } }
+                                            SettingValueButton { width: 70px; height: 30px; text: root.library-type-filter == "missing" ? "[已移动]" : "已移动"; clicked => { root.library-type-filter = "missing"; root.refresh-library-view(); } }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: 138px;
+                                background: transparent;
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    Text { height: 14px; text: "分组"; color: #6d7582; font-size: 9px; font-weight: 650; }
+                                    Rectangle {
+                                        height: 36px;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: #c9ced7;
+                                        background: #ffffff;
+                                        Text { x: 10px; width: parent.width - 28px; text: root.library-group-label; color: #404650; font-size: 10px; font-weight: 650; overflow: elide; vertical-alignment: center; }
+                                        Text { x: parent.width - 20px; width: 12px; text: "▼"; color: #6d7582; font-size: 7px; vertical-alignment: center; }
+                                        TouchArea {
+                                            accessible-role: button;
+                                            accessible-label: "切换书库分组";
+                                            clicked => {
+                                                if (root.library-shelves.length > 0) {
+                                                    root.library-group-filter-index = Math.mod(root.library-group-filter-index + 1, root.library-shelves.length);
+                                                    root.library-group-filter = root.library-shelves[root.library-group-filter-index].id;
+                                                    root.library-group-label = root.library-shelves[root.library-group-filter-index].name;
+                                                    root.refresh-library-view();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: 118px;
+                                background: transparent;
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    Text { height: 14px; text: "排序"; color: #6d7582; font-size: 9px; font-weight: 650; }
+                                    Rectangle {
+                                        height: 36px;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: #c9ced7;
+                                        background: #ffffff;
+                                        Text { x: 10px; width: parent.width - 28px; text: root.library-sort-mode == "title" ? "书名排序" : "最近打开"; color: #404650; font-size: 10px; font-weight: 650; overflow: elide; vertical-alignment: center; }
+                                        Text { x: parent.width - 20px; width: 12px; text: "▼"; color: #6d7582; font-size: 7px; vertical-alignment: center; }
+                                        TouchArea {
+                                            accessible-role: button;
+                                            accessible-label: "切换书库排序";
+                                            clicked => {
+                                                root.library-sort-mode = root.library-sort-mode == "recent" ? "title" : "recent";
+                                                root.refresh-library-view();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 24px;
+                        spacing: 5px;
+                        Text {
+                            width: 20px;
+                            text: root.library-book-count;
+                            color: #404650;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "本地书籍";
+                            color: #6d7582;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 38px;
+                        spacing: 9px;
+                        IconSlot {
+                            width: 20px;
+                            name: "library";
+                            icon-size: 20px;
+                            icon-color: #315fc4;
+                        }
+                        Text {
+                            width: 70px;
+                            text: root.library-group-label;
+                            color: #171a20;
+                            font-size: 16px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: #f5f6f8;
+                            Text {
+                                text: root.library-book-count + " 本";
+                                color: #6d7582;
+                                font-size: 9px;
+                                font-weight: 650;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if root.library-book-count == 0 : Rectangle {
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #c9ced7;
+                        background: #f7f8fa;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 9px;
+                            Text { text: "R"; color: #214ea9; font-size: 24px; font-weight: 750; horizontal-alignment: center; }
+                            Text { text: root.library-search-query == "" && root.library-type-filter == "all" && root.library-group-filter == "all" ? "书库还是空的" : "没有符合条件的图书"; color: #171a20; font-size: 18px; font-weight: 680; horizontal-alignment: center; }
+                            Text { text: root.library-search-query == "" && root.library-type-filter == "all" && root.library-group-filter == "all" ? "可从上方导入 TXT 或 EPUB 图书。" : "调整搜索、类型或分组筛选后再试。"; color: #6d7582; font-size: 11px; horizontal-alignment: center; }
+                        }
+                    }
+
+                    if root.library-book-count > 0 : ListView {
+                        accessible-id: "library-grid";
+                        for row in root.library-book-rows : Rectangle {
+                            height: 444px;
+                            background: transparent;
+                            HorizontalLayout {
+                                spacing: 14px;
+                                BookCard {
+                                    book: row.first;
+                                    shelves: root.library-shelves;
+                                    open(path) => { root.open-document(path); }
+                                    remove(path, title) => { root.request-remove-book(path, title); }
+                                    move-to-group(path, group-id, group-name) => { root.move-library-book(path, group-id, group-name); }
+                                }
+                                if row.has-second : BookCard {
+                                    book: row.second;
+                                    shelves: root.library-shelves;
+                                    open(path) => { root.open-document(path); }
+                                    remove(path, title) => { root.request-remove-book(path, title); }
+                                    move-to-group(path, group-id, group-name) => { root.move-library-book(path, group-id, group-name); }
+                                }
+                                if !row.has-second : Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                                if row.has-third : BookCard {
+                                    book: row.third;
+                                    shelves: root.library-shelves;
+                                    open(path) => { root.open-document(path); }
+                                    remove(path, title) => { root.request-remove-book(path, title); }
+                                    move-to-group(path, group-id, group-name) => { root.move-library-book(path, group-id, group-name); }
+                                }
+                                if !row.has-third : Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                                if row.has-fourth : BookCard {
+                                    book: row.fourth;
+                                    shelves: root.library-shelves;
+                                    open(path) => { root.open-document(path); }
+                                    remove(path, title) => { root.request-remove-book(path, title); }
+                                    move-to-group(path, group-id, group-name) => { root.move-library-book(path, group-id, group-name); }
+                                }
+                                if !row.has-fourth && root.settings-library-columns >= 4 : Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                                if row.has-fifth : BookCard {
+                                    book: row.fifth;
+                                    shelves: root.library-shelves;
+                                    open(path) => { root.open-document(path); }
+                                    remove(path, title) => { root.request-remove-book(path, title); }
+                                    move-to-group(path, group-id, group-name) => { root.move-library-book(path, group-id, group-name); }
+                                }
+                                if !row.has-fifth && root.settings-library-columns == 5 : Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.reader-open && !root.settings-open : Rectangle {
+                x: root.workspace-pane-width + 8px;
+                y: 0px;
+                width: parent.width - root.workspace-pane-width - 8px;
+                height: parent.height;
+                background: #ffffff;
+
+                VerticalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    spacing: 0px;
+
+                    if root.open-document-tabs.length > 0 : Rectangle {
+                        height: 44px;
+                        background: #f7f8fa;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 5px;
+                            padding-bottom: 5px;
+                            spacing: 6px;
+                            for tab in root.open-document-tabs : DocumentTabButton {
+                                tab: tab;
+                                selected => { root.select-open-document(tab.path); }
+                                closed => { root.close-open-document(tab.path); }
+                            }
+                            Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                        }
+                    }
+
+                    if root.document-path == "" : Rectangle {
+                        background: #ffffff;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 12px;
+                            Text { text: "尚未打开书籍"; color: #171a20; font-size: 24px; font-weight: 720; horizontal-alignment: center; }
+                            Text { text: "前往书库选择 TXT 或 EPUB，已打开的书籍会保留为标签。"; color: #6d7582; font-size: 12px; horizontal-alignment: center; }
+                            ActionButton { width: 120px; height: 38px; text: "请打开书籍"; primary: true; clicked => { root.back-to-library(); } }
+                        }
+                    }
+
+                    if root.document-path != "" : Rectangle {
+                        height: 46px;
+                        background: #fafbfc;
+                        border-color: #dde1e7;
+                        border-width: 0px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            spacing: 7px;
+                            ActionButton { width: 58px; text: "打开"; clicked => { root.open-file-hint(); } }
+                            if root.document-kind == "TXT" : ActionButton {
+                                width: 78px;
+                                text: root.edit-mode ? "取消编辑" : "开始编辑";
+                                clicked => { root.request-edit-mode(!root.edit-mode); }
+                            }
+                            if root.document-kind == "TXT" : ActionButton {
+                                width: 58px;
+                                text: "保存";
+                                primary: root.edit-mode;
+                                enabled: root.edit-mode;
+                                clicked => { root.save-edited-text(root.edit-content); }
+                            }
+                            if root.document-kind == "TXT" : ActionButton {
+                                width: 66px;
+                                text: "另存为";
+                                enabled: root.edit-mode;
+                                clicked => { root.save-edited-text-as(root.edit-content); }
+                            }
+                            if root.document-kind == "TXT" : ActionButton { width: 58px; text: "搜索"; primary: root.reader-side-panel == "search"; clicked => { root.reader-side-panel = "search"; } }
+                            if root.document-kind == "TXT" : ActionButton { width: 72px; text: "书签 " + root.bookmarks.length; primary: root.reader-side-panel == "bookmarks"; clicked => { root.reader-side-panel = "bookmarks"; } }
+                            if root.document-kind == "EPUB" : ActionButton { width: 96px; text: "编辑书籍信息"; enabled: false; }
+                            if root.document-kind == "EPUB" : ActionButton { width: 96px; text: "编辑当前章节"; enabled: false; }
+                            if root.document-kind == "EPUB" : ActionButton { width: 66px; text: "另存为"; enabled: false; }
+                            if root.document-kind == "EPUB" : ActionButton { width: 96px; text: "放弃全部修改"; enabled: false; }
+                            ActionButton { width: 58px; text: "关闭"; clicked => { root.close-open-document(root.document-path); } }
+                            Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                            if root.document-kind == "TXT" : Text { width: 48px; text: "保存编码"; color: #6d7582; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+                            if root.document-kind == "TXT" : Rectangle {
+                                width: 92px;
+                                height: 32px;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: #dde1e7;
+                                background: #f5f6f8;
+                                Text { text: root.document-encoding; color: #6d7582; font-size: 10px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            if root.document-kind == "TXT" : Text { width: 40px; text: "换行符"; color: #6d7582; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+                            if root.document-kind == "TXT" : Rectangle {
+                                width: 104px;
+                                height: 32px;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: #dde1e7;
+                                background: #f5f6f8;
+                                Text { text: root.document-line-ending; color: #6d7582; font-size: 10px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            if root.document-kind == "TXT" : ActionButton { width: 78px; text: "按编码重载"; enabled: false; }
+                            if root.document-kind == "EPUB" : Text { width: 176px; text: "原 EPUB 只读 · 修改需另存"; color: #6d7582; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                        Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #dde1e7; }
+                    }
+
+                    if root.document-kind == "EPUB" : Rectangle {
+                        height: 44px;
+                        background: #ffffff;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 5px;
+                            padding-bottom: 5px;
+                            spacing: 7px;
+                            SettingValueButton { width: 34px; text: "←"; clicked => { root.previous-chapter(); } }
+                            Text { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; text: root.active-chapter-title == "" ? root.document-title : root.active-chapter-title; color: #404650; font-size: 12px; font-weight: 680; overflow: elide; vertical-alignment: center; }
+                            Text { width: 76px; text: (root.active-chapter-index + 1) + " / " + root.chapters.length; color: #6d7582; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 88px; text: "已恢复阅读位置"; color: #4b8f56; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                            ActionButton { width: 48px; text: "前段"; enabled: root.reader-window-start > 0; clicked => { root.navigate-to(Math.max(0, root.reader-window-start - root.paragraphs.length)); } }
+                            ActionButton { width: 48px; text: "后段"; enabled: root.reader-window-start + root.paragraphs.length < root.document-paragraph-count; clicked => { root.navigate-to(root.reader-window-start + root.paragraphs.length); } }
+                            SettingValueButton { width: 34px; text: "→"; clicked => { root.next-chapter(); } }
+                            ActionButton { width: 72px; text: "书签 " + root.bookmarks.length; primary: root.reader-side-panel == "bookmarks"; clicked => { root.reader-side-panel = "bookmarks"; } }
+                            ActionButton { width: 58px; text: "搜索"; primary: root.reader-side-panel == "search"; clicked => { root.reader-side-panel = "search"; } }
+                            ActionButton { width: 70px; text: "书籍信息"; primary: root.reader-side-panel == "info"; clicked => { root.reader-side-panel = "info"; } }
+                        }
+                        Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #dde1e7; }
+                    }
+
+                    if root.document-path != "" : HorizontalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            width: root.reader-tools-pane-width;
+                            background: #f7f8fa;
+                            border-color: #dde1e7;
+                            border-width: 0px;
+
+                            VerticalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 16px;
+                                padding-bottom: 12px;
+                                spacing: 9px;
+
+                                Text {
+                                    height: 12px;
+                                    text: "CONTENTS";
+                                    color: #214ea9;
+                                    font-family: "Cascadia Mono";
+                                    font-size: 8px;
+                                    font-weight: 750;
+                                    letter-spacing: 1.1px;
+                                }
+                                HorizontalLayout {
+                                    height: 27px;
+                                    Text { text: root.document-kind + " 目录"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; }
+                                    Text { width: 36px; text: root.chapters.length + " 项"; color: #9ba2ad; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+                                }
+
+                                ListView {
+                                    accessible-id: "txt-outline";
+                                    vertical-stretch: 1;
+                                    for chapter in root.chapters : Rectangle {
+                                        height: 36px;
+                                        border-radius: 6px;
+                                        background: chapter-touch.has-hover ? #eceff3 : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            spacing: 7px;
+                                            Text { width: 24px; text: chapter.line-number; color: #9ba2ad; font-family: "Cascadia Mono"; font-size: 8px; horizontal-alignment: right; vertical-alignment: center; }
+                                            Text { text: chapter.title; color: #404650; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                        }
+                                        chapter-touch := TouchArea {
+                                            accessible-role: list-item;
+                                            accessible-label: chapter.title;
+                                            clicked => {
+                                                if (root.document-kind == "EPUB") {
+                                                    root.open-epub-location(chapter.chapter-index, 0);
+                                                } else {
+                                                    root.navigate-to(chapter.paragraph-index);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if false : VerticalLayout {
+                                    spacing: 7px;
+                                    Rectangle { height: 1px; background: #dde1e7; }
+                                    Text { height: 28px; text: "全文搜索"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; }
+                                    HorizontalLayout {
+                                        height: 38px;
+                                        spacing: 6px;
+                                        search-input := LineEdit { accessible-id: "txt-search-input"; enabled: !root.edit-mode; placeholder-text: "搜索全文"; accepted(text) => { root.search-text(text); } }
+                                        ActionButton { width: 48px; text: "搜索"; enabled: !root.edit-mode; clicked => { root.search-text(search-input.text); } }
+                                    }
+                                    Text { height: 18px; text: root.search-results.length > 0 ? "共 " + root.search-results.length + " 条结果" : "输入关键词并按回车"; color: #6d7582; font-size: 9px; vertical-alignment: center; }
+                                    if root.search-results.length > 0 : ListView {
+                                        height: Math.min(150px, root.search-results.length * 57px);
+                                        accessible-id: "txt-search-results";
+                                        for result[index] in root.search-results : Rectangle {
+                                            height: 57px;
+                                            border-radius: 6px;
+                                            background: result-touch.has-hover ? #eceff3 : transparent;
+                                            HorizontalLayout {
+                                                padding: 7px;
+                                                spacing: 7px;
+                                                Text { width: 24px; text: index < 9 ? "0" + (index + 1) : (index + 1); color: #214ea9; font-family: "Cascadia Mono"; font-size: 9px; horizontal-alignment: right; }
+                                                VerticalLayout { spacing: 3px; Text { height: 14px; text: result.label; color: #6d7582; font-size: 8px; overflow: elide; } Text { text: result.preview; color: #404650; font-size: 10px; wrap: word-wrap; overflow: elide; } }
+                                            }
+                                            result-touch := TouchArea {
+                                                accessible-role: list-item;
+                                                accessible-label: result.label;
+                                                clicked => {
+                                                    if (root.document-kind == "EPUB") {
+                                                        root.open-epub-location(result.chapter-index, result.paragraph-index);
+                                                    } else {
+                                                        root.navigate-to(result.paragraph-index);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.search-results.length == 0 : Rectangle { height: 38px; background: transparent; }
+                                    Rectangle { height: 1px; background: #dde1e7; }
+                                    HorizontalLayout { height: 30px; Text { text: "书签"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; } ActionButton { width: 56px; text: "添加"; enabled: !root.edit-mode; clicked => { root.add-bookmark(); } } }
+                                    Text { height: 34px; text: "在当前阅读位置添加书签；书签会持久化到 SQLite。"; color: #6d7582; font-size: 9px; wrap: word-wrap; }
+                                    Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 6px;
+                            background: #dde1e7;
+                            reader-tools-resize := TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                mouse-cursor: col-resize;
+                                moved => {
+                                    if (self.pressed) {
+                                        root.preview-pane-resize("reader-tools", Math.max(180px, Math.min(480px, self.absolute-position.x + self.mouse-x - root.workspace-pane-width - 8px)) / 1px);
+                                    }
+                                }
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up && root.pane-resize-preview-kind == "reader-tools") {
+                                        root.commit-pane-resize("reader-tools", root.pane-resize-preview-width);
+                                    } else if (event.kind == PointerEventKind.cancel && root.pane-resize-preview-kind == "reader-tools") {
+                                        root.pane-resize-preview-active = false;
+                                        root.pane-resize-preview-kind = "";
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            background: root.settings-effective-theme == "dark"
+                                ? #191c22
+                                : #ffffff;
+
+                            if root.settings-has-background : Image {
+                                source: root.settings-background-image;
+                                width: parent.width;
+                                height: parent.height;
+                                image-fit: cover;
+                                opacity: root.settings-background-opacity;
+                            }
+
+                            if root.edit-mode : Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: parent.width;
+                                height: parent.height;
+                                background: #f7f8fa;
+                                TextEdit {
+                                    x: 24px;
+                                    y: 20px;
+                                    width: parent.width - 48px;
+                                    height: parent.height - 40px;
+                                    accessible-id: "txt-editor";
+                                    text <=> root.edit-content;
+                                    font-family: root.settings-font-family;
+                                    font-size: root.settings-font-size * 1px;
+                                    wrap: word-wrap;
+                                    placeholder-text: "输入 TXT 内容";
+                                    edited(text) => { root.edit-content = text; }
+                                }
+                            }
+
+                            if !root.edit-mode && root.settings-reading-columns == 1 : reader-list := ScrollView {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                accessible-role: list;
+                                accessible-id: "txt-reader-list";
+                                viewport-y <=> root.reader-viewport-y;
+                                viewport-width: self.width;
+                                viewport-height: Math.max(self.height, reader-column.preferred-height);
+                                reader-column := VerticalLayout {
+                                    width: parent.width;
+                                    for paragraph in root.paragraphs : row := Rectangle {
+                                    height: paragraph.kind == "image"
+                                        ? 300px
+                                        : paragraph.kind == "blank"
+                                        ? (root.settings-txt-blank-lines == "remove" ? 0px : 24px)
+                                        : paragraph.kind == "heading"
+                                            ? 76px + root.settings-paragraph-spacing * root.settings-font-size * 1px
+                                            : paragraph-body.preferred-height
+                                                + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                                + ((root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) - 1.2) * root.settings-font-size * 1px
+                                                + 18px;
+                                    background: paragraph.index == root.active-paragraph-index
+                                        ? (root.settings-effective-theme == "dark" ? #283149 : #f8faff)
+                                        : transparent;
+                                    paragraph-body := Text {
+                                        visible: paragraph.kind != "image";
+                                        x: Math.max(root.settings-horizontal-margin * 1px, (parent.width - root.settings-content-width * 1px) / 2);
+                                        y: paragraph.kind == "heading" ? root.settings-vertical-margin * 1px : 13px;
+                                        width: Math.min(parent.width - root.settings-horizontal-margin * 2px, root.settings-content-width * 1px);
+                                        text: paragraph.kind == "paragraph" && root.document-kind == "TXT" && root.settings-txt-leading-indent == "clean"
+                                            ? (root.settings-first-line-indent >= 1.5 ? "　　" : root.settings-first-line-indent > 0 ? "　" : "") + paragraph.text
+                                            : paragraph.kind == "paragraph" && root.document-kind == "EPUB" && root.settings-epub-override-indent
+                                                ? (root.settings-first-line-indent >= 1.5 ? "　　" : root.settings-first-line-indent > 0 ? "　" : "") + paragraph.text
+                                            : paragraph.text;
+                                        color: root.settings-effective-theme == "dark" ? #e7e9ee : #171a20;
+                                        font-family: root.document-kind == "EPUB" && !root.settings-epub-override-font
+                                            ? "Microsoft YaHei UI"
+                                            : root.settings-font-family;
+                                        font-size: paragraph.kind == "heading"
+                                            && (root.document-kind == "TXT" ? root.settings-chapter-title-style == "prominent" : root.settings-epub-publisher-styles)
+                                            ? root.settings-font-size * 1px + 5px
+                                            : root.document-kind == "EPUB" && !root.settings-epub-override-font-size ? 18px : root.settings-font-size * 1px;
+                                        font-weight: paragraph.kind == "heading"
+                                            && (root.document-kind == "TXT" ? root.settings-chapter-title-style == "prominent" : root.settings-epub-publisher-styles)
+                                            ? 700
+                                            : root.settings-font-weight;
+                                        letter-spacing: paragraph.kind == "heading" ? 0px : root.settings-letter-spacing * root.settings-font-size * 1px;
+                                        horizontal-alignment: paragraph.kind == "heading" && root.document-kind == "TXT" && root.settings-chapter-title-style == "prominent" ? center : left;
+                                        wrap: word-wrap;
+                                    }
+                                    if paragraph.kind == "image" && paragraph.has-image : Image {
+                                        x: Math.max(root.settings-horizontal-margin * 1px, (parent.width - root.settings-content-width * 1px) / 2);
+                                        y: 14px;
+                                        width: Math.min(parent.width - root.settings-horizontal-margin * 2px, root.settings-content-width * 1px);
+                                        height: 270px;
+                                        source: paragraph.image;
+                                        image-fit: contain;
+                                    }
+                                    TouchArea {
+                                        clicked => {
+                                            root.active-paragraph-index = paragraph.index;
+                                            root.reading-position-changed(paragraph.index);
+                                        }
+                                    }
+                                }
+                            }
+                            }
+
+                            if !root.edit-mode && root.settings-reading-columns == 2 : double-reader-list := ScrollView {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                accessible-role: list;
+                                accessible-id: "double-column-reader-list";
+                                viewport-y <=> root.reader-viewport-y;
+                                viewport-width: self.width;
+                                viewport-height: Math.max(self.height, double-reader-column.preferred-height);
+                                double-reader-column := VerticalLayout {
+                                    width: parent.width;
+                                    for pair in root.paragraph-rows : pair-row := Rectangle {
+                                    height: pair.first.kind == "image" || (pair.has-second && pair.second.kind == "image")
+                                        ? 300px
+                                        : pair.first.kind == "blank"
+                                        ? 24px
+                                        : pair.first.kind == "heading"
+                                            ? 76px + root.settings-paragraph-spacing * root.settings-font-size * 1px
+                                            : Math.max(first-body.preferred-height, root.settings-font-size * 4px)
+                                                + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                                + ((root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) - 1.2) * root.settings-font-size * 1px
+                                                + 20px;
+                                    background: pair.first.index == root.active-paragraph-index || (pair.has-second && pair.second.index == root.active-paragraph-index)
+                                        ? (root.settings-effective-theme == "dark" ? #283149 : #f8faff) : transparent;
+                                    first-body := Text {
+                                        visible: pair.first.kind != "image";
+                                        x: root.settings-horizontal-margin * 1px;
+                                        y: pair.first.kind == "heading" ? root.settings-vertical-margin * 1px : 13px;
+                                        width: pair.first.kind == "heading"
+                                            ? parent.width - root.settings-horizontal-margin * 2px
+                                            : (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2;
+                                        text: pair.first.kind == "paragraph" && ((root.document-kind == "TXT" && root.settings-txt-leading-indent == "clean") || (root.document-kind == "EPUB" && root.settings-epub-override-indent))
+                                            ? (root.settings-first-line-indent >= 1.5 ? "　　" : root.settings-first-line-indent > 0 ? "　" : "") + pair.first.text : pair.first.text;
+                                        color: root.settings-effective-theme == "dark" ? #e7e9ee : #171a20;
+                                        font-family: root.document-kind == "EPUB" && !root.settings-epub-override-font ? "Microsoft YaHei UI" : root.settings-font-family;
+                                        font-size: pair.first.kind == "heading" ? root.settings-font-size * 1px + 5px : root.document-kind == "EPUB" && !root.settings-epub-override-font-size ? 18px : root.settings-font-size * 1px;
+                                        font-weight: pair.first.kind == "heading" ? 700 : root.settings-font-weight;
+                                        letter-spacing: pair.first.kind == "heading" ? 0px : root.settings-letter-spacing * root.settings-font-size * 1px;
+                                        horizontal-alignment: pair.first.kind == "heading" ? center : left;
+                                        wrap: word-wrap;
+                                    }
+                                    if pair.has-second : second-body := Text {
+                                        visible: pair.second.kind != "image";
+                                        x: root.settings-horizontal-margin * 1px + (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2 + 28px;
+                                        y: 13px;
+                                        width: (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2;
+                                        text: pair.second.kind == "paragraph" && ((root.document-kind == "TXT" && root.settings-txt-leading-indent == "clean") || (root.document-kind == "EPUB" && root.settings-epub-override-indent))
+                                            ? (root.settings-first-line-indent >= 1.5 ? "　　" : root.settings-first-line-indent > 0 ? "　" : "") + pair.second.text : pair.second.text;
+                                        color: root.settings-effective-theme == "dark" ? #e7e9ee : #171a20;
+                                        font-family: root.document-kind == "EPUB" && !root.settings-epub-override-font ? "Microsoft YaHei UI" : root.settings-font-family;
+                                        font-size: root.document-kind == "EPUB" && !root.settings-epub-override-font-size ? 18px : root.settings-font-size * 1px;
+                                        font-weight: root.settings-font-weight;
+                                        letter-spacing: root.settings-letter-spacing * root.settings-font-size * 1px;
+                                        wrap: word-wrap;
+                                    }
+                                    if pair.first.kind == "image" && pair.first.has-image : Image {
+                                        x: root.settings-horizontal-margin * 1px;
+                                        y: 14px;
+                                        width: (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2;
+                                        height: 270px;
+                                        source: pair.first.image;
+                                        image-fit: contain;
+                                    }
+                                    if pair.has-second && pair.second.kind == "image" && pair.second.has-image : Image {
+                                        x: root.settings-horizontal-margin * 1px + (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2 + 28px;
+                                        y: 14px;
+                                        width: (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2;
+                                        height: 270px;
+                                        source: pair.second.image;
+                                        image-fit: contain;
+                                    }
+                                    TouchArea {
+                                        x: first-body.x; y: 0px; width: first-body.width; height: parent.height;
+                                        clicked => { root.active-paragraph-index = pair.first.index; root.reading-position-changed(pair.first.index); }
+                                    }
+                                    if pair.has-second : TouchArea {
+                                        x: root.settings-horizontal-margin * 1px + (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2 + 28px;
+                                        y: 0px;
+                                        width: (parent.width - root.settings-horizontal-margin * 2px - 28px) / 2;
+                                        height: parent.height;
+                                        clicked => { root.active-paragraph-index = pair.second.index; root.reading-position-changed(pair.second.index); }
+                                    }
+                                }
+                            }
+                            }
+                        }
+
+                        if root.reader-side-panel != "" : Rectangle {
+                            width: 6px;
+                            background: #dde1e7;
+                            epub-search-resize := TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                mouse-cursor: col-resize;
+                                moved => {
+                                    if (self.pressed) {
+                                        root.preview-pane-resize("reader-side", Math.max(210px, Math.min(480px, root.width - self.absolute-position.x - self.mouse-x)) / 1px);
+                                    }
+                                }
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up && root.pane-resize-preview-kind == "reader-side") {
+                                        root.commit-pane-resize("reader-side", root.pane-resize-preview-width);
+                                    } else if (event.kind == PointerEventKind.cancel && root.pane-resize-preview-kind == "reader-side") {
+                                        root.pane-resize-preview-active = false;
+                                        root.pane-resize-preview-kind = "";
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.reader-side-panel != "" : Rectangle {
+                            width: root.epub-search-panel-width;
+                            background: #f7f8fa;
+                            VerticalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 14px;
+                                padding-bottom: 12px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    height: 28px;
+                                    Text {
+                                        text: root.reader-side-panel == "search" ? "全文搜索" : root.reader-side-panel == "bookmarks" ? "书签" : "书籍信息";
+                                        color: #303641;
+                                        font-size: 15px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    SettingValueButton { width: 42px; height: 28px; text: "×"; clicked => { root.reader-side-panel = ""; } }
+                                }
+                                if root.reader-side-panel == "search" : HorizontalLayout {
+                                    height: 36px;
+                                    spacing: 6px;
+                                    epub-search-input := LineEdit { placeholder-text: "搜索全部章节"; accepted(text) => { root.search-text(text); } }
+                                    ActionButton { width: 46px; text: "搜索"; clicked => { root.search-text(epub-search-input.text); } }
+                                }
+                                if root.reader-side-panel == "search" : Text { height: 22px; text: "共 " + root.search-results.length + " 条结果"; color: #6d7582; font-size: 11px; vertical-alignment: center; }
+                                if root.reader-side-panel == "search" && root.search-results.length > 0 : ListView {
+                                    for result in root.search-results : Rectangle {
+                                        height: 66px;
+                                        border-radius: 6px;
+                                        background: epub-result-touch.has-hover ? #eceff3 : transparent;
+                                        HorizontalLayout {
+                                            padding: 9px;
+                                            spacing: 9px;
+                                            Text { width: 34px; text: result.label; color: #214ea9; font-size: 11px; font-weight: 650; overflow: elide; vertical-alignment: top; }
+                                            Text { text: result.preview; color: #404650; font-size: 12px; wrap: word-wrap; overflow: elide; }
+                                        }
+                                        epub-result-touch := TouchArea {
+                                            accessible-role: list-item;
+                                            accessible-label: result.label;
+                                            clicked => { root.open-epub-location(result.chapter-index, result.paragraph-index); }
+                                        }
+                                    }
+                                }
+                                if root.reader-side-panel == "search" && root.search-results.length == 0 : Text { height: 52px; text: "输入关键词后，这里会显示匹配位置和正文摘要。"; color: #8b929e; font-size: 12px; wrap: word-wrap; }
+
+                                if root.reader-side-panel == "bookmarks" : HorizontalLayout {
+                                    height: 36px;
+                                    Text { text: "共 " + root.bookmarks.length + " 个书签"; color: #6d7582; font-size: 12px; vertical-alignment: center; }
+                                    ActionButton { width: 72px; text: "添加当前位置"; clicked => { root.add-bookmark(); } }
+                                }
+                                if root.reader-side-panel == "bookmarks" && root.bookmarks.length > 0 : ListView {
+                                    for mark in root.bookmarks : Rectangle {
+                                        height: 68px;
+                                        border-radius: 7px;
+                                        background: bookmark-touch.has-hover ? #eceff3 : transparent;
+                                        VerticalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 8px;
+                                            padding-top: 8px;
+                                            padding-bottom: 7px;
+                                            spacing: 3px;
+                                            HorizontalLayout {
+                                                height: 23px;
+                                                Text { text: mark.label; color: #214ea9; font-size: 12px; font-weight: 680; overflow: elide; vertical-alignment: center; }
+                                                SettingValueButton { width: 38px; height: 23px; text: "删除"; clicked => { root.delete-bookmark(mark.id); } }
+                                            }
+                                            Text { text: mark.detail; color: #6d7582; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                        }
+                                        bookmark-touch := TouchArea {
+                                            accessible-role: list-item;
+                                            accessible-label: mark.label;
+                                            clicked => {
+                                                if (root.document-kind == "EPUB") {
+                                                    root.open-epub-location(mark.chapter-index, mark.paragraph-index);
+                                                } else {
+                                                    root.navigate-to(mark.paragraph-index);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.reader-side-panel == "bookmarks" && root.bookmarks.length == 0 : Text { height: 52px; text: "还没有书签。点击“添加当前位置”即可保存当前阅读位置。"; color: #8b929e; font-size: 12px; wrap: word-wrap; }
+
+                                if root.reader-side-panel == "info" : VerticalLayout {
+                                    spacing: 9px;
+                                    Text { height: 25px; text: root.document-title; color: #214ea9; font-size: 14px; font-weight: 700; overflow: elide; }
+                                    Text { height: 22px; text: "作者：" + (root.document-author == "" ? "未知" : root.document-author); color: #4b535f; font-size: 12px; overflow: elide; }
+                                    Text { height: 22px; text: "格式：" + root.document-kind; color: #4b535f; font-size: 12px; }
+                                    Text { height: 22px; text: "章节：" + root.chapters.length; color: #4b535f; font-size: 12px; }
+                                    Text { height: 54px; text: "路径：" + root.document-path; color: #6d7582; font-size: 11px; wrap: word-wrap; overflow: elide; }
+                                    Text { height: 42px; text: root.document-kind == "EPUB" ? "EPUB 以只读方式打开；标题、封面、目录与正文图片来自书籍文件。" : "TXT 可在编辑模式下修改并保存。"; color: #6d7582; font-size: 11px; wrap: word-wrap; }
+                                }
+                                Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.settings-open : Rectangle {
+                x: root.workspace-pane-width + 8px;
+                y: 0px;
+                width: parent.width - root.workspace-pane-width - 8px;
+                height: parent.height;
+                background: root.settings-effective-theme == "dark" ? #191c22 : #ffffff;
+
+                HorizontalLayout {
+                    spacing: 0px;
+                    Rectangle {
+                        width: root.settings-navigation-width;
+                        background: root.settings-effective-theme == "dark" ? #22262e : #f7f8fa;
+                        VerticalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 14px;
+                            padding-bottom: 8px;
+                            spacing: 0px;
+                            Text {
+                                height: 46px;
+                                text: "设置";
+                                color: root.settings-effective-theme == "dark" ? #f4f5f7 : #171a20;
+                                font-size: 23px;
+                                font-weight: 740;
+                                vertical-alignment: center;
+                            }
+                            ScrollView {
+                                viewport-width: self.width;
+                                viewport-height: Math.max(self.height, settings-navigation.preferred-height);
+                                settings-navigation := VerticalLayout {
+                                width: parent.width;
+                                spacing: 1px;
+                            SettingsGroupLabel { label: "外观"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "主题"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "appearance.theme"; clicked => { root.settings-section = "appearance.theme"; } }
+                            SettingsPageItem { label: "字体"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "appearance.font"; clicked => { root.settings-section = "appearance.font"; } }
+                            SettingsPageItem { label: "页面布局"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "appearance.layout"; clicked => { root.settings-section = "appearance.layout"; } }
+
+                            SettingsGroupLabel { label: "阅读"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "阅读排版"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "reading.typography"; clicked => { root.settings-section = "reading.typography"; } }
+
+                            SettingsGroupLabel { label: "操作"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "快捷键"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "controls.shortcuts"; clicked => { root.settings-section = "controls.shortcuts"; } }
+
+                            SettingsGroupLabel { label: "书籍"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "章节识别"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "books.chapters"; clicked => { root.settings-section = "books.chapters"; } }
+
+                            SettingsGroupLabel { label: "数据"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "备份"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "data.backup"; clicked => { root.settings-section = "data.backup"; } }
+
+                            SettingsGroupLabel { label: "高级"; dark: root.settings-effective-theme == "dark"; }
+                            SettingsPageItem { label: "文件关联"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "advanced.association"; clicked => { root.settings-section = "advanced.association"; } }
+                            SettingsPageItem { label: "缓存"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "advanced.cache"; clicked => { root.settings-section = "advanced.cache"; } }
+                            SettingsPageItem { label: "硬件加速"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "advanced.hardware"; clicked => { root.settings-section = "advanced.hardware"; } }
+                            SettingsPageItem { label: "DPI"; dark: root.settings-effective-theme == "dark"; active: root.settings-section == "advanced.dpi"; clicked => { root.settings-section = "advanced.dpi"; } }
+                                Rectangle { height: 8px; background: transparent; }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 6px;
+                        background: root.settings-effective-theme == "dark" ? #313640 : #dde1e7;
+                        settings-navigation-resize := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: col-resize;
+                            moved => {
+                                if (self.pressed) {
+                                    root.preview-pane-resize("settings-navigation", Math.max(180px, Math.min(360px, self.absolute-position.x + self.mouse-x - root.workspace-pane-width - 8px)) / 1px);
+                                }
+                            }
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.up && root.pane-resize-preview-kind == "settings-navigation") {
+                                    root.commit-pane-resize("settings-navigation", root.pane-resize-preview-width);
+                                } else if (event.kind == PointerEventKind.cancel && root.pane-resize-preview-kind == "settings-navigation") {
+                                    root.pane-resize-preview-active = false;
+                                    root.pane-resize-preview-kind = "";
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: root.settings-effective-theme == "dark" ? #191c22 : #ffffff;
+                        ScrollView {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-width: self.width;
+                            viewport-height: Math.max(self.height, settings-content.preferred-height);
+                            settings-content := VerticalLayout {
+                            width: parent.width;
+                            padding-left: 32px;
+                            padding-right: 32px;
+                            padding-top: 26px;
+                            padding-bottom: 24px;
+                            spacing: 16px;
+                            VerticalLayout {
+                                height: 66px;
+                                spacing: 5px;
+                                Text {
+                                    text: root.settings-section == "appearance.theme" ? "外观 / 主题"
+                                        : root.settings-section == "appearance.font" ? "外观 / 字体"
+                                        : root.settings-section == "appearance.layout" ? "外观 / 页面布局"
+                                        : root.settings-section == "reading.typography" ? "阅读 / 阅读排版"
+                                        : root.settings-section == "controls.shortcuts" ? "操作 / 快捷键"
+                                        : root.settings-section == "books.chapters" ? "书籍 / 章节识别"
+                                        : root.settings-section == "data.backup" ? "数据 / 备份"
+                                        : root.settings-section == "advanced.association" ? "高级 / 文件关联"
+                                        : root.settings-section == "advanced.cache" ? "高级 / 缓存"
+                                        : root.settings-section == "advanced.hardware" ? "高级 / 硬件加速" : "高级 / DPI";
+                                    color: root.settings-effective-theme == "dark" ? #f4f5f7 : #171a20;
+                                    font-size: 26px; font-weight: 740; vertical-alignment: center;
+                                }
+                                Text { text: "修改后立即生效，并保存到本机 SQLite。"; color: #6d7582; font-size: 11px; vertical-alignment: center; }
+                            }
+
+                            if root.settings-section == "appearance.theme" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 74px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc;
+                                    HorizontalLayout { padding: 14px; spacing: 8px;
+                                        Text { text: "主题"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; }
+                                        SettingValueButton { text: root.settings-theme == "light" ? "[亮色]" : "亮色"; clicked => { root.update-setting("theme", "light"); } }
+                                        SettingValueButton { text: root.settings-theme == "dark" ? "[暗色]" : "暗色"; clicked => { root.update-setting("theme", "dark"); } }
+                                        SettingValueButton { text: root.settings-theme == "system" ? "[跟随 Windows]" : "跟随 Windows"; width: 112px; clicked => { root.update-setting("theme", "system"); } }
+                                    }
+                                }
+                                Rectangle { height: 106px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc;
+                                    VerticalLayout { padding: 12px; spacing: 7px;
+                                        Text { height: 20px; text: "自定义背景"; color: #404650; font-size: 11px; font-weight: 680; }
+                                        HorizontalLayout { height: 34px; spacing: 7px;
+                                            Text { text: "显示强度 " + Math.round(root.settings-background-opacity * 100) + "%"; color: #404650; font-size: 11px; vertical-alignment: center; }
+                                            SettingValueButton { text: "−10%"; clicked => { root.change-setting("backgroundOpacity", -0.1); } }
+                                            SettingValueButton { text: "+10%"; clicked => { root.change-setting("backgroundOpacity", 0.1); } }
+                                            ActionButton { text: "选择背景"; clicked => { root.choose-background(); } }
+                                            ActionButton { text: "清除"; enabled: root.settings-has-background; clicked => { root.clear-background(); } }
+                                        }
+                                    }
+                                }
+                                Text { height: 20px; text: "背景设置也会显示在“页面布局”中，两处修改实时同步。"; color: #6d7582; font-size: 9px; }
+                            }
+
+                            if root.settings-section == "appearance.font" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 142px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc;
+                                    VerticalLayout { padding: 14px; spacing: 9px;
+                                        Text { height: 22px; text: "阅读字体"; color: #404650; font-size: 12px; font-weight: 680; }
+                                        HorizontalLayout { height: 34px; spacing: 7px;
+                                            SettingValueButton { text: root.settings-font-id == "system" ? "[系统默认]" : "系统默认"; width: 88px; clicked => { root.update-setting("font", "system"); } }
+                                            SettingValueButton { text: root.settings-font-id == "source-han-serif" ? "[思源宋体]" : "思源宋体"; width: 88px; clicked => { root.update-setting("font", "source-han-serif"); } }
+                                            SettingValueButton { text: root.settings-font-id == "noto-serif-cjk" ? "[Noto Serif CJK]" : "Noto Serif CJK"; width: 116px; clicked => { root.update-setting("font", "noto-serif-cjk"); } }
+                                        }
+                                        HorizontalLayout { height: 34px; spacing: 7px;
+                                            SettingValueButton { text: root.settings-font-id == "source-han-sans" ? "[思源黑体]" : "思源黑体"; width: 88px; clicked => { root.update-setting("font", "source-han-sans"); } }
+                                            SettingValueButton { text: root.settings-font-id == "noto-sans-cjk" ? "[Noto Sans CJK]" : "Noto Sans CJK"; width: 116px; clicked => { root.update-setting("font", "noto-sans-cjk"); } }
+                                            SettingValueButton { text: root.settings-font-id == "lxgw-wenkai" ? "[霞鹜文楷]" : "霞鹜文楷"; width: 88px; clicked => { root.update-setting("font", "lxgw-wenkai"); } }
+                                        }
+                                    }
+                                }
+                                Text { height: 34px; text: "字体不会内置，也不会联网下载；所选字体未安装时自动回退到系统中文字体。"; color: #6d7582; font-size: 10px; wrap: word-wrap; }
+                            }
+
+                            if root.settings-section == "appearance.layout" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 198px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc;
+                                    VerticalLayout { padding: 12px; spacing: 8px;
+                                        HorizontalLayout { height: 32px; spacing: 7px; Text { text: "书库每行"; color: #404650; font-size: 11px; font-weight: 680; vertical-alignment: center; }
+                                            SettingValueButton { text: root.settings-library-columns == 3 ? "[3 本]" : "3 本"; clicked => { root.update-setting("libraryColumns", "3"); } }
+                                            SettingValueButton { text: root.settings-library-columns == 4 ? "[4 本]" : "4 本"; clicked => { root.update-setting("libraryColumns", "4"); } }
+                                            SettingValueButton { text: root.settings-library-columns == 5 ? "[5 本]" : "5 本"; clicked => { root.update-setting("libraryColumns", "5"); } }
+                                        }
+                                        HorizontalLayout { height: 32px; spacing: 7px; Text { text: "背景强度 " + Math.round(root.settings-background-opacity * 100) + "%"; color: #404650; font-size: 11px; vertical-alignment: center; }
+                                            SettingValueButton { text: "−10%"; clicked => { root.change-setting("backgroundOpacity", -0.1); } }
+                                            SettingValueButton { text: "+10%"; clicked => { root.change-setting("backgroundOpacity", 0.1); } }
+                                            ActionButton { text: "选择背景"; clicked => { root.choose-background(); } }
+                                            ActionButton { text: "清除"; enabled: root.settings-has-background; clicked => { root.clear-background(); } }
+                                        }
+                                        HorizontalLayout { height: 32px; spacing: 10px;
+                                            Text { text: "最小化时隐藏到托盘"; color: #404650; font-size: 11px; vertical-alignment: center; }
+                                            SettingSwitch { active: root.settings-minimize-to-tray; toggled => { root.update-setting("minimizeToTray", root.settings-minimize-to-tray ? "false" : "true"); } }
+                                        }
+                                        HorizontalLayout { height: 32px; spacing: 10px;
+                                            Text { text: "关闭窗口"; color: #404650; font-size: 11px; vertical-alignment: center; }
+                                            SettingValueButton { text: root.settings-close-action == "exit" ? "[退出]" : "退出"; clicked => { root.update-setting("closeAction", "exit"); } }
+                                            SettingValueButton { text: root.settings-close-action == "tray" ? "[最小化到托盘]" : "最小化到托盘"; width: 116px; clicked => { root.update-setting("closeAction", "tray"); } }
+                                        }
+                                    }
+                                }
+                                Text { height: 20px; text: "背景设置与“主题”页面共用同一份数据。"; color: #6d7582; font-size: 9px; }
+                            }
+
+                            if root.settings-section == "reading.typography" : reading-settings-grid := GridLayout {
+                                spacing: 16px;
+                                VerticalLayout {
+                                    row: 0;
+                                    col: 0;
+                                    spacing: 14px;
+                                    HorizontalLayout {
+                                        height: 38px;
+                                        Text { text: "全局排版"; color: #404650; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+                                        Text { text: "修改会实时作用于当前 TXT / EPUB"; color: #8a929e; font-size: 10px; vertical-alignment: center; }
+                                        ActionButton { width: 116px; text: "恢复默认排版"; clicked => { root.update-setting("reading.reset", ""); } }
+                                    }
+
+                                    Rectangle {
+                                        height: 184px; border-radius: 12px; border-width: 1px; border-color: #dbe1ea; background: #f3f6fa;
+                                        VerticalLayout {
+                                            padding: 14px; spacing: 5px;
+                                            Text { height: 24px; text: "字体"; color: #214ea9; font-size: 13px; font-weight: 720; }
+                                            StepSettingRow { label: "字号"; value: root.settings-font-size + " px"; decrease => { root.change-setting("fontSize", -1); } increase => { root.change-setting("fontSize", 1); } }
+                                            StepSettingRow { label: "字重"; value: root.settings-font-weight; decrease-text: "−100"; increase-text: "+100"; decrease => { root.change-setting("fontWeight", -100); } increase => { root.change-setting("fontWeight", 100); } }
+                                            StepSettingRow { label: "字间距"; value: root.settings-letter-spacing + " em"; decrease => { root.change-setting("letterSpacing", -0.01); } increase => { root.change-setting("letterSpacing", 0.01); } }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 228px; border-radius: 12px; border-width: 1px; border-color: #dbe1ea; background: #f3f6fa;
+                                        VerticalLayout {
+                                            padding: 14px; spacing: 5px;
+                                            Text { height: 24px; text: "段落"; color: #214ea9; font-size: 13px; font-weight: 720; }
+                                            StepSettingRow { label: "首行缩进"; value: root.settings-first-line-indent + " em"; decrease => { root.change-setting("firstLineIndent", -0.25); } increase => { root.change-setting("firstLineIndent", 0.25); } }
+                                            StepSettingRow { label: "行间距"; value: root.settings-line-height; decrease => { root.change-setting("lineHeight", -0.05); } increase => { root.change-setting("lineHeight", 0.05); } }
+                                            StepSettingRow { label: "段落间距"; value: root.settings-paragraph-spacing + " em"; decrease => { root.change-setting("paragraphSpacing", -0.05); } increase => { root.change-setting("paragraphSpacing", 0.05); } }
+                                            Rectangle {
+                                                height: 38px; border-radius: 6px; background: #ffffff;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 8px;
+                                                    Text { width: 112px; text: "正文对齐"; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; }
+                                                    Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                                                    SettingValueButton { width: 82px; height: 30px; text: root.settings-text-alignment == "justify" ? "[两端对齐]" : "两端对齐"; clicked => { root.update-setting("alignment", "justify"); } }
+                                                    SettingValueButton { width: 82px; height: 30px; text: root.settings-text-alignment == "left" ? "[左对齐]" : "左对齐"; clicked => { root.update-setting("alignment", "left"); } }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 228px; border-radius: 12px; border-width: 1px; border-color: #dbe1ea; background: #f3f6fa;
+                                        VerticalLayout {
+                                            padding: 14px; spacing: 5px;
+                                            Text { height: 24px; text: "页面"; color: #214ea9; font-size: 13px; font-weight: 720; }
+                                            StepSettingRow { label: "正文宽度"; value: root.settings-content-width + " px"; decrease-text: "−20"; increase-text: "+20"; decrease => { root.change-setting("contentWidth", -20); } increase => { root.change-setting("contentWidth", 20); } }
+                                            StepSettingRow { label: "左右边距"; value: root.settings-horizontal-margin + " px"; decrease-text: "−4"; increase-text: "+4"; decrease => { root.change-setting("horizontalMargin", -4); } increase => { root.change-setting("horizontalMargin", 4); } }
+                                            StepSettingRow { label: "上下边距"; value: root.settings-vertical-margin + " px"; decrease-text: "−4"; increase-text: "+4"; decrease => { root.change-setting("verticalMargin", -4); } increase => { root.change-setting("verticalMargin", 4); } }
+                                            Rectangle {
+                                                height: 38px; border-radius: 6px; background: #ffffff;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 8px;
+                                                    Text { width: 112px; text: "阅读栏数"; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; }
+                                                    Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                                                    SettingValueButton { width: 74px; height: 30px; text: root.settings-reading-columns == 1 ? "[单栏]" : "单栏"; clicked => { root.update-setting("readingColumns", "1"); } }
+                                                    SettingValueButton { width: 74px; height: 30px; text: root.settings-reading-columns == 2 ? "[双栏]" : "双栏"; clicked => { root.update-setting("readingColumns", "2"); } }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 236px; border-radius: 12px; border-width: 1px; border-color: #dbe1ea; background: #f3f6fa;
+                                        VerticalLayout {
+                                            padding: 14px; spacing: 6px;
+                                            Text { height: 24px; text: "TXT 排版"; color: #214ea9; font-size: 13px; font-weight: 720; }
+                                            Rectangle { height: 38px; border-radius: 6px; background: #ffffff;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 8px; Text { width: 112px; text: "原始段首空格"; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; } Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; } SettingValueButton { width: 72px; height: 30px; text: root.settings-txt-leading-indent == "clean" ? "[清理]" : "清理"; clicked => { root.update-setting("txtIndent", "clean"); } } SettingValueButton { width: 72px; height: 30px; text: root.settings-txt-leading-indent == "preserve" ? "[保留]" : "保留"; clicked => { root.update-setting("txtIndent", "preserve"); } } }
+                                            }
+                                            Rectangle { height: 38px; border-radius: 6px; background: #ffffff;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 8px; Text { width: 112px; text: "空行"; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; } Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; } SettingValueButton { width: 64px; height: 30px; text: root.settings-txt-blank-lines == "preserve" ? "[保留]" : "保留"; clicked => { root.update-setting("txtBlankLines", "preserve"); } } SettingValueButton { width: 64px; height: 30px; text: root.settings-txt-blank-lines == "single" ? "[合并]" : "合并"; clicked => { root.update-setting("txtBlankLines", "single"); } } SettingValueButton { width: 64px; height: 30px; text: root.settings-txt-blank-lines == "remove" ? "[隐藏]" : "隐藏"; clicked => { root.update-setting("txtBlankLines", "remove"); } } }
+                                            }
+                                            ToggleSettingRow { label: "自动合并疑似错误换行"; description: "默认关闭，适合段落被硬换行的文本"; active: root.settings-merge-wrapped-lines; toggled => { root.update-setting("mergeWrappedLines", root.settings-merge-wrapped-lines ? "false" : "true"); } }
+                                            Rectangle { height: 38px; border-radius: 6px; background: #ffffff;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 8px; Text { width: 112px; text: "章节标题"; color: #4e5561; font-size: 11px; font-weight: 580; vertical-alignment: center; } Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; } SettingValueButton { width: 64px; height: 30px; text: root.settings-chapter-title-style == "prominent" ? "[突出]" : "突出"; clicked => { root.update-setting("chapterTitleStyle", "prominent"); } } SettingValueButton { width: 64px; height: 30px; text: root.settings-chapter-title-style == "compact" ? "[紧凑]" : "紧凑"; clicked => { root.update-setting("chapterTitleStyle", "compact"); } } SettingValueButton { width: 86px; height: 30px; text: root.settings-chapter-title-style == "plain" ? "[跟随正文]" : "跟随正文"; clicked => { root.update-setting("chapterTitleStyle", "plain"); } } }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 420px; border-radius: 12px; border-width: 1px; border-color: #dbe1ea; background: #f3f6fa;
+                                        VerticalLayout {
+                                            padding: 14px; spacing: 6px;
+                                            Text { height: 24px; text: "EPUB 排版 · 覆盖仅限正文"; color: #214ea9; font-size: 13px; font-weight: 720; }
+                                            ToggleSettingRow { label: "使用书籍原始样式"; active: root.settings-epub-publisher-styles; toggled => { root.update-setting("epubPublisher", root.settings-epub-publisher-styles ? "false" : "true"); } }
+                                            ToggleSettingRow { label: "使用书籍内嵌字体"; active: root.settings-epub-embedded-fonts; toggled => { root.update-setting("epubEmbedded", root.settings-epub-embedded-fonts ? "false" : "true"); } }
+                                            Text { height: 20px; text: "正文覆盖项"; color: #6d7582; font-size: 10px; font-weight: 650; vertical-alignment: center; }
+                                            ToggleSettingRow { label: "覆盖字体"; active: root.settings-epub-override-font; toggled => { root.update-setting("epubFont", root.settings-epub-override-font ? "false" : "true"); } }
+                                            ToggleSettingRow { label: "覆盖字号"; active: root.settings-epub-override-font-size; toggled => { root.update-setting("epubFontSize", root.settings-epub-override-font-size ? "false" : "true"); } }
+                                            ToggleSettingRow { label: "覆盖首行缩进"; active: root.settings-epub-override-indent; toggled => { root.update-setting("epubIndent", root.settings-epub-override-indent ? "false" : "true"); } }
+                                            ToggleSettingRow { label: "覆盖行间距"; active: root.settings-epub-override-line-height; toggled => { root.update-setting("epubLineHeight", root.settings-epub-override-line-height ? "false" : "true"); } }
+                                            ToggleSettingRow { label: "覆盖段落间距"; active: root.settings-epub-override-paragraph-spacing; toggled => { root.update-setting("epubParagraphSpacing", root.settings-epub-override-paragraph-spacing ? "false" : "true"); } }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    row: root.width >= 1200px ? 0 : 1;
+                                    col: root.width >= 1200px ? 1 : 0;
+                                    min-width: root.width >= 1200px ? 220px : 0px;
+                                    preferred-width: root.width >= 1200px ? 248px : 0px;
+                                    min-height: root.width >= 1200px ? 0px : 112px;
+                                    border-radius: 9px;
+                                    border-width: 1px;
+                                    border-color: #c9d7f5;
+                                    background: root.settings-effective-theme == "dark" ? #22262e : #f8faff;
+                                    VerticalLayout {
+                                        padding-left: 18px;
+                                        padding-right: 18px;
+                                        padding-top: 16px;
+                                        padding-bottom: 16px;
+                                        spacing: root.settings-paragraph-spacing * root.settings-font-size * 1px + 6px;
+                                        Text { height: 26px; text: "实时预览"; color: root.settings-effective-theme == "dark" ? #a9c0f5 : #315fc4; font-size: 10px; font-weight: 720; }
+                                        Text { height: 34px; text: "第一章 初入江湖"; color: root.settings-effective-theme == "dark" ? #f0f2f6 : #214ea9; font-family: root.settings-font-family; font-size: Math.min(root.settings-font-size + 1, 22) * 1px; font-weight: Math.max(root.settings-font-weight, 600); wrap: word-wrap; }
+                                        Text { text: (root.settings-first-line-indent >= 1.5 ? "　　" : root.settings-first-line-indent > 0 ? "　" : "") + "清晨的雾气还未散尽，山间小道上只听见自己的脚步声。排版修改会立即反映在这里。"; color: root.settings-effective-theme == "dark" ? #dce0e8 : #404650; font-family: root.settings-font-family; font-size: Math.min(root.settings-font-size, 18) * 1px; font-weight: root.settings-font-weight; letter-spacing: root.settings-letter-spacing * root.settings-font-size * 1px; wrap: word-wrap; }
+                                        Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+                                    }
+                                }
+                            }
+
+                            if root.settings-section == "controls.shortcuts" : VerticalLayout {
+                                spacing: 8px;
+                                Text { height: 25px; text: "默认全部为空。输入组合（如 Ctrl+O）后按回车；冲突会被拒绝。"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                                HorizontalLayout { height: 360px; spacing: 12px;
+                                    VerticalLayout { spacing: 7px;
+                                        Text { height: 20px; text: "打开文件"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-open; accepted(text) => { root.set-shortcut("open", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("open", ""); } } }
+                                        Text { height: 20px; text: "保存"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-save; accepted(text) => { root.set-shortcut("save", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("save", ""); } } }
+                                        Text { height: 20px; text: "另存为"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-save-as; accepted(text) => { root.set-shortcut("saveAs", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("saveAs", ""); } } }
+                                        Text { height: 20px; text: "关闭当前图书"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-close; accepted(text) => { root.set-shortcut("close", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("close", ""); } } }
+                                        Text { height: 20px; text: "切换编辑模式"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-toggle-edit; accepted(text) => { root.set-shortcut("toggleEdit", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("toggleEdit", ""); } } }
+                                    }
+                                    VerticalLayout { spacing: 7px;
+                                        Text { height: 20px; text: "上一章"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-previous-chapter; accepted(text) => { root.set-shortcut("previousChapter", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("previousChapter", ""); } } }
+                                        Text { height: 20px; text: "下一章"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-next-chapter; accepted(text) => { root.set-shortcut("nextChapter", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("nextChapter", ""); } } }
+                                        Text { height: 20px; text: "添加书签"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-bookmark; accepted(text) => { root.set-shortcut("bookmark", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("bookmark", ""); } } }
+                                        Text { height: 20px; text: "打开书库"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-show-library; accepted(text) => { root.set-shortcut("showLibrary", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("showLibrary", ""); } } }
+                                        Text { height: 20px; text: "打开设置"; color: #404650; font-size: 10px; } HorizontalLayout { height: 36px; spacing: 5px; LineEdit { placeholder-text: "无"; text: root.shortcut-show-settings; accepted(text) => { root.set-shortcut("showSettings", text); } } SettingValueButton { width: 48px; text: "清除"; clicked => { root.set-shortcut("showSettings", ""); } } }
+                                    }
+                                }
+                                ActionButton { width: 92px; text: "全部清除"; clicked => { root.clear-shortcuts(); } }
+                            }
+
+                            if root.settings-section == "books.chapters" : VerticalLayout {
+                                spacing: 12px;
+                                Text { height: 34px; text: "TXT 章节标题识别正则 · 与正文净化、阅读排版相互独立"; color: #404650; font-size: 11px; font-weight: 680; vertical-alignment: center; }
+                                TextEdit { height: 190px; text <=> root.settings-chapter-pattern; font-family: "Cascadia Mono"; font-size: 11px; wrap: word-wrap; edited(text) => { root.settings-chapter-pattern = text; } }
+                                Text { height: 28px; text: root.settings-pattern-error == "" ? "修改后点击应用；打开或刷新 TXT 时使用新规则。" : root.settings-pattern-error; color: root.settings-pattern-error == "" ? #6d7582 : #bd2c2c; font-size: 10px; vertical-alignment: center; }
+                                HorizontalLayout { height: 36px; spacing: 8px; ActionButton { text: "应用规则"; primary: true; clicked => { root.set-chapter-pattern(root.settings-chapter-pattern); } } ActionButton { text: "恢复默认"; clicked => { root.reset-chapter-pattern(); } } }
+                            }
+
+                            if root.settings-section == "data.backup" : VerticalLayout {
+                                spacing: 12px;
+                                Rectangle { height: 122px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc;
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 9px;
+                                        Text { height: 20px; text: "内容备份位置"; color: #404650; font-size: 12px; font-weight: 680; }
+                                        Text { height: 25px; text: root.settings-backup-path == "" ? "每次备份时可命名并选择保存位置" : root.settings-backup-path; color: #6d7582; font-size: 10px; overflow: elide; }
+                                        HorizontalLayout {
+                                            height: 34px;
+                                            spacing: 8px;
+                                            ActionButton { width: 92px; text: "默认文件夹"; clicked => { root.choose-backup-path(); } }
+                                            ActionButton { width: 90px; text: "命名并备份"; primary: true; clicked => { root.create-backup(); } }
+                                            ActionButton { width: 102px; text: "选择多份恢复"; clicked => { root.restore-backup(); } }
+                                            ActionButton { width: 112px; text: "恢复目录内全部"; clicked => { root.restore-backup-directory(); } }
+                                        }
+                                    }
+                                }
+                                Text { height: 42px; text: "ZIP Deflate 流式压缩，按 SHA-256 内容去重。只备份有效书籍内容，不包含设置、书签、进度、分组和阅读记录。"; color: #6d7582; font-size: 10px; wrap: word-wrap; }
+                                Text { height: 60px; text: root.settings-backup-result; color: #214ea9; font-size: 10px; wrap: word-wrap; }
+                            }
+
+                            if root.settings-section == "advanced.association" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 74px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc; HorizontalLayout { padding: 14px; Text { text: "文件关联"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; } Text { text: "不自动修改 Windows 文件关联"; color: #6d7582; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; } } }
+                                Text { height: 34px; text: "当前页面仅显示运行状态，不提供可操作开关。"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                            }
+
+                            if root.settings-section == "advanced.cache" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 74px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc; HorizontalLayout { padding: 14px; Text { text: "缓存"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; } Text { text: "EPUB 按章节解析，本地状态由 SQLite 管理"; color: #6d7582; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; } } }
+                                Text { height: 34px; text: "当前页面仅显示运行状态，不提供可操作开关。"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                            }
+
+                            if root.settings-section == "advanced.hardware" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 74px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc; HorizontalLayout { padding: 14px; Text { text: "硬件加速"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; } Text { text: "使用 Slint femtovg，必要时自动回退软件渲染"; color: #6d7582; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; } } }
+                                Text { height: 34px; text: "当前页面仅显示运行状态，不提供可操作开关。"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                            }
+
+                            if root.settings-section == "advanced.dpi" : VerticalLayout {
+                                spacing: 10px;
+                                Rectangle { height: 74px; border-radius: 9px; border-width: 1px; border-color: #dde1e7; background: #fafbfc; HorizontalLayout { padding: 14px; Text { text: "DPI"; color: #404650; font-size: 12px; font-weight: 680; vertical-alignment: center; } Text { text: "跟随 Windows 缩放，界面使用逻辑像素"; color: #6d7582; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; } } }
+                                Text { height: 34px; text: "当前页面仅显示运行状态，不提供可操作开关。"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                            }
+
+                            Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - 27px;
+            width: parent.width;
+            height: 27px;
+            background: #fafbfc;
+            Rectangle { y: 0; width: parent.width; height: 1px; background: #dde1e7; }
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    horizontal-stretch: 1;
+                    text: root.status-text;
+                    color: #6d7582;
+                    font-size: 10px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Text {
+                    width: 170px;
+                    text: root.settings-open ? "设置已本地持久化" : root.reader-open ? "段落 " + (root.active-paragraph-index + 1) + " / " + root.document-paragraph-count : "本地优先";
+                    color: #6d7582;
+                    font-size: 10px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Recreate the two persistent chrome regions when the main view switches.
+        // This avoids stale retained layers in the Windows FemtoVG backend.
+        if root.reader-open : BrandContent {
+            x: 0px;
+            y: 0px;
+            width: root.workspace-pane-width;
+            height: 48px;
+        }
+        if root.reader-open : ActionButton {
+            x: 10px;
+            y: 59px;
+            width: root.workspace-pane-width - 20px;
+            height: 42px;
+            text: "打开文件";
+            primary: true;
+            clicked => { root.open-file-hint(); }
+        }
+
+        if root.pane-resize-preview-active : Rectangle {
+            x: root.pane-resize-preview-x - 1px;
+            y: 48px;
+            width: 3px;
+            height: parent.height - 48px;
+            background: #315fc4;
+        }
+
+        if root.remove-confirm-open : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #11182778;
+            modal-blocker := TouchArea { }
+
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: Math.min(470px, parent.width - 48px);
+                height: 270px;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: #d9dee7;
+                background: #ffffff;
+
+                VerticalLayout {
+                    padding-left: 26px;
+                    padding-right: 26px;
+                    padding-top: 24px;
+                    padding-bottom: 22px;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 46px;
+                        spacing: 13px;
+                        Rectangle {
+                            width: 42px;
+                            height: 42px;
+                            border-radius: 21px;
+                            background: #fff1f0;
+                            Text { text: "−"; color: #c63b32; font-size: 24px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "从书库移除"; color: #171a20; font-size: 19px; font-weight: 740; vertical-alignment: center; }
+                            Text { text: "此操作不会删除电脑中的原书文件"; color: #6d7582; font-size: 10px; vertical-alignment: center; }
+                        }
+                    }
+                    Text { height: 30px; text: "确定移除《" + root.remove-confirm-title + "》吗？"; color: #404650; font-size: 12px; font-weight: 650; wrap: word-wrap; vertical-alignment: center; }
+                    Rectangle {
+                        height: 64px;
+                        border-radius: 9px;
+                        background: #f7f8fa;
+                        Text {
+                            x: 13px; y: 10px; width: parent.width - 26px; height: parent.height - 20px;
+                            text: "将清除这本书的书库记录、阅读进度、书签和最近打开信息；源 TXT / EPUB 文件保持不变。";
+                            color: #6d7582; font-size: 10px; wrap: word-wrap; vertical-alignment: center;
+                        }
+                    }
+                    Rectangle { min-height: 0px; preferred-height: 0px; vertical-stretch: 1; background: transparent; }
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 10px;
+                        Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; background: transparent; }
+                        ActionButton { width: 84px; text: "取消"; clicked => { root.remove-confirm-open = false; } }
+                        ActionButton {
+                            width: 104px;
+                            text: "确认移除";
+                            primary: true;
+                            clicked => {
+                                root.remove-confirm-open = false;
+                                root.remove-library-book(root.remove-confirm-path, root.remove-confirm-title);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

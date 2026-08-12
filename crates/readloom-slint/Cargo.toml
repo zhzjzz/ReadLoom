@@ -1,0 +1,24 @@
+[package]
+name = "readloom-slint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+readloom-core = { path = "../readloom-core" }
+image.workspace = true
+rfd.workspace = true
+slint.workspace = true
+tray-icon.workspace = true
+
+[build-dependencies]
+embed-resource = "=3.0.11"
+slint-build.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Registry"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
