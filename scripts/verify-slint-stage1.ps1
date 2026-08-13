@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path -Parent $PSScriptRoot
-$executable = Join-Path $repository 'target\release\readloom-slint.exe'
+$executable = Join-Path $repository 'target\release\readloom.exe'
 $validationRoot = Join-Path $repository 'target\validation'
 $smokeDirectory = Join-Path $validationRoot ("slint-stage1-{0}" -f [guid]::NewGuid().ToString('N'))
 $stateDatabase = Join-Path $smokeDirectory 'readloom-state.sqlite3'
@@ -17,8 +17,8 @@ try {
     if (-not $SkipBuild) {
         & cargo test -p readloom-core
         if ($LASTEXITCODE -ne 0) { throw 'readloom-core tests failed.' }
-        & cargo build -p readloom-slint --release
-        if ($LASTEXITCODE -ne 0) { throw 'readloom-slint release build failed.' }
+        & cargo build -p readloom --release
+        if ($LASTEXITCODE -ne 0) { throw 'readloom release build failed.' }
     }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw "Slint executable not found: $executable"

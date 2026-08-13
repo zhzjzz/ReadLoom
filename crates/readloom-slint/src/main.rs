@@ -4092,7 +4092,7 @@ mod tests {
 
     #[test]
     fn reader_side_lists_fill_the_remaining_panel_height() {
-        let source = include_str!("../../../ui/readloom.slint");
+        let source = include_str!("../../../ui/readloom.slint").replace("\r\n", "\n");
         let search_list = source
             .split("accessible-id: \"reader-search-results\";")
             .nth(1)
@@ -4323,7 +4323,7 @@ mod tests {
 
     #[test]
     fn outline_list_uses_the_remaining_navigation_column_height() {
-        let source = include_str!("../../../ui/readloom.slint");
+        let source = include_str!("../../../ui/readloom.slint").replace("\r\n", "\n");
         assert!(!source.contains("height: Math.min(224px"));
         assert!(source.contains("accessible-id: \"txt-outline\";\n                                    vertical-stretch: 1;"));
     }

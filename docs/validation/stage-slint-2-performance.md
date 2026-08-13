@@ -9,7 +9,7 @@
 性能反馈环：
 
 ```powershell
-cargo test -p readloom-slint epub_image_rows_do_not_decode_on_the_ui_thread -- --nocapture
+cargo test -p readloom epub_image_rows_do_not_decode_on_the_ui_thread -- --nocapture
 ```
 
 该测试真实创建包含大 PNG 的 EPUB，经 `ReadloomCore::open_epub` 进入 `ReaderParagraphModel::row_data`，验证首次读取只返回占位项，随后等待后台结果并确认同一模型从缓存取得真实图片。它不使用易受机器负载影响的硬编码毫秒阈值；耗时只作为诊断输出，行为断言负责判红。
@@ -54,10 +54,10 @@ git diff --check
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release -p readloom-slint
+cargo build --release -p readloom
 ```
 
-workspace 测试总数为 63：`readloom-core` 36 项、`readloom-slint` 27 项。
+workspace 测试总数为 63：`readloom-core` 36 项、`readloom` 27 项。
 
 ## 阅读背景与书库分组回归
 

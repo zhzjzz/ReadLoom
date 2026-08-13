@@ -4001,6 +4001,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "readloom"
+version = "0.1.0"
+dependencies = [
+ "embed-resource",
+ "fontdb",
+ "image",
+ "readloom-core",
+ "rfd",
+ "slint",
+ "slint-build",
+ "tempfile",
+ "tray-icon",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
 name = "readloom-core"
 version = "0.1.0"
 dependencies = [
@@ -4017,23 +4034,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "unicode-normalization",
- "zip",
-]
-
-[[package]]
-name = "readloom-slint"
-version = "0.1.0"
-dependencies = [
- "embed-resource",
- "fontdb",
- "image",
- "readloom-core",
- "rfd",
- "slint",
- "slint-build",
- "tempfile",
- "tray-icon",
- "windows-sys 0.61.2",
  "zip",
 ]
 

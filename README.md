@@ -32,7 +32,7 @@ npm run tauri dev
 
 ## Slint 原生迁移切片
 
-仓库当前保留上面的 Tauri/Svelte 应用作为功能和回归基线，同时新增两个原生 Rust crate：`readloom-core` 封装书库、TXT 安全编辑、EPUB 受控布局、搜索/阅读位置和设置持久化，`readloom-slint` 提供不依赖 WebView2 的桌面界面。原生版本默认读取旧版的 `%APPDATA%\app.readloom.desktop\readloom-state.sqlite3`，现已支持：
+仓库当前保留上面的 Tauri/Svelte 应用作为功能和回归基线，同时新增两个原生 Rust crate：`readloom-core` 封装书库、TXT 安全编辑、EPUB 受控布局、搜索/阅读位置和设置持久化，`readloom` 提供不依赖 WebView2 的桌面界面。原生版本默认读取旧版的 `%APPDATA%\app.readloom.desktop\readloom-state.sqlite3`，现已支持：
 
 - 原生文件选择器打开 TXT/EPUB，旧书库 3/4/5 列展示；
 - TXT 目录、搜索、长文本虚拟化、编辑、保留编码/换行保存与另存为；
@@ -52,7 +52,7 @@ npm run slint:build
 npm run slint:verify
 ```
 
-Slint release 产物位于 `target\release\readloom-slint.exe`。`slint:verify` 会运行核心测试、构建 release、断言 PE 子系统为 Windows GUI、真实启动窗口、记录启动时间与内存，并断言进程树中没有控制台或 `msedgewebview2.exe` 子进程。
+Slint release 产物位于 `target\release\readloom.exe`。`slint:verify` 会运行核心测试、构建 release、断言 PE 子系统为 Windows GUI、真实启动窗口、记录启动时间与内存，并断言进程树中没有控制台或 `msedgewebview2.exe` 子进程。
 
 ## 验证命令
 

@@ -31,10 +31,10 @@ git diff --check
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release -p readloom-slint
+cargo build --release -p readloom
 ```
 
-结果：`readloom-core` 50 项测试、`readloom-slint` 44 项测试全部通过；release 二进制成功生成。覆盖内容包括 TXT 的 UTF-8 BOM、UTF-16 LE/BE、GBK/GB18030、LF/CRLF、外部修改冲突和只读保护，以及 EPUB 的 XHTML 转义、行内元素保留、ZIP 条目保留、`mimetype` 约束、重开验证、冲突另存和失败回滚。
+结果：`readloom-core` 50 项测试、`readloom` 44 项测试全部通过；release 二进制成功生成。覆盖内容包括 TXT 的 UTF-8 BOM、UTF-16 LE/BE、GBK/GB18030、LF/CRLF、外部修改冲突和只读保护，以及 EPUB 的 XHTML 转义、行内元素保留、ZIP 条目保留、`mimetype` 约束、重开验证、冲突另存和失败回滚。
 
 ## 原生窗口验证状态
 

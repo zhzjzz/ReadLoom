@@ -1,5 +1,5 @@
 param(
-    [string]$Executable = "target\release\readloom-slint.exe"
+    [string]$Executable = "target\release\readloom.exe"
 )
 
 $ErrorActionPreference = 'Stop'
