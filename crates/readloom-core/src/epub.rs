@@ -39,12 +39,13 @@ pub struct EpubChapter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpubImageResource {
     pub media_type: String,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
     pub alt_text: String,
 }
 
 #[derive(Debug, Clone)]
 struct EpubChapterSource {
+    resource_id: String,
     resource_href: String,
 }
 
@@ -171,7 +172,10 @@ impl EpubDocument {
                 spine_index: spine.order(),
                 resource_id: resource_id.clone(),
             });
-            chapter_sources.push(EpubChapterSource { resource_href });
+            chapter_sources.push(EpubChapterSource {
+                resource_id: entry.id().to_owned(),
+                resource_href,
+            });
         }
         if chapters.is_empty() {
             return Err(invalid_epub("EPUB 没有可阅读的流式正文。"));
@@ -243,6 +247,12 @@ impl EpubDocument {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .chapter_index
+    }
+
+    pub fn active_chapter_resource_path(&self) -> Option<&str> {
+        self.chapters
+            .get(self.active_chapter_index())
+            .map(|chapter| chapter.resource_id.as_str())
     }
 
     pub fn load_chapter(&self, chapter_index: usize) -> Result<(), CoreError> {
@@ -339,7 +349,7 @@ impl EpubDocument {
         for source in self.chapter_sources.iter().take(target_chapter) {
             let entry = epub
                 .manifest()
-                .by_href(&source.resource_href)
+                .by_id(&source.resource_id)
                 .ok_or_else(|| invalid_epub("EPUB 章节资源已经不存在。"))?;
             let source = entry
                 .read_str()
@@ -356,7 +366,7 @@ impl EpubDocument {
         for (chapter_index, source) in self.chapter_sources.iter().enumerate() {
             let entry = epub
                 .manifest()
-                .by_href(&source.resource_href)
+                .by_id(&source.resource_id)
                 .ok_or_else(|| invalid_epub("EPUB 章节资源已经不存在。"))?;
             let source = entry
                 .read_str()
@@ -395,7 +405,7 @@ fn load_chapter_from_epub(
 ) -> Result<(LoadedEpubChapter, Option<String>, Option<EpubImageResource>), CoreError> {
     let manifest = epub.manifest();
     let entry = manifest
-        .by_href(&chapter_source.resource_href)
+        .by_id(&chapter_source.resource_id)
         .ok_or_else(|| invalid_epub("EPUB 章节资源已经不存在。"))?;
     let source = entry
         .read_str()
@@ -466,6 +476,8 @@ fn load_chapter_from_epub(
         let source_end_utf16 = source_offset_utf16 + text.encode_utf16().count();
         let paragraph_index = paragraphs.len();
         paragraphs.push(ReadingParagraph {
+            block_id: crate::BlockId::epub(&chapter.resource_id, paragraph_index),
+            editable: kind != ParagraphKind::Image,
             kind,
             text,
             source_start: source_offset,
@@ -491,7 +503,7 @@ fn load_chapter_from_epub(
     ))
 }
 
-fn fingerprint_file(path: &Path) -> Result<String, CoreError> {
+pub(crate) fn fingerprint_file(path: &Path) -> Result<String, CoreError> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -696,7 +708,7 @@ fn validated_image_resource(
     };
     signature_matches.then(|| EpubImageResource {
         media_type: media_type.to_owned(),
-        bytes,
+        bytes: bytes.into(),
         alt_text,
     })
 }
@@ -739,7 +751,7 @@ fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn validate_archive(path: &Path) -> Result<(), CoreError> {
+pub(crate) fn validate_archive(path: &Path) -> Result<(), CoreError> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() || metadata.len() > MAXIMUM_EPUB_BYTES {
         return Err(invalid_epub("EPUB 文件无效或超过 512 MiB。"));
@@ -1128,6 +1140,31 @@ mod tests {
     }
 
     #[test]
+    fn epub_search_and_navigation_support_percent_encoded_chapter_hrefs() {
+        let (_directory, path) = encoded_chapter_href_epub();
+        let document = EpubDocument::open(&path).expect("open encoded-href epub");
+
+        let hits = document.search("编码路径正文", 10);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chapter_index, 1);
+        assert_eq!(hits[0].paragraph_index, 1);
+        let locator = EpubReadingLocator {
+            version: 2,
+            chapter_index: hits[0].chapter_index,
+            paragraph_index: hits[0].paragraph_index,
+            character_offset_in_paragraph: hits[0].character_offset_in_paragraph,
+        };
+        let paragraph_index = document
+            .load_locator(&locator)
+            .expect("load encoded-href search result");
+        assert_eq!(
+            document.paragraphs()[paragraph_index].text,
+            "编码路径正文。"
+        );
+    }
+
+    #[test]
     fn legacy_global_epub_locator_is_migrated_to_a_chapter_local_position() {
         let (_directory, path) = two_chapter_epub();
         let document = EpubDocument::open(&path).expect("open two-chapter epub");
@@ -1282,6 +1319,53 @@ mod tests {
                 )
                 .expect("start file");
             writer.write_all(content.as_bytes()).expect("write file");
+        }
+        writer.finish().expect("finish epub");
+        (directory, path)
+    }
+
+    fn encoded_chapter_href_epub() -> (TempDir, PathBuf) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("encoded-chapter-href.epub");
+        let file = File::create(&path).expect("create epub");
+        let mut writer = ZipWriter::new(file);
+        let entries = [
+            (
+                "mimetype",
+                "application/epub+zip",
+                CompressionMethod::Stored,
+            ),
+            (
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "EPUB/package.opf",
+                r#"<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">encoded-href</dc:identifier><dc:title>编码章节路径测试</dc:title><dc:language>zh-CN</dc:language><meta property="dcterms:modified">2026-08-12T00:00:00Z</meta></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="chapter%20two.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "EPUB/one.xhtml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第一章</h1><p>普通正文。</p></body></html>"#,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "EPUB/chapter two.xhtml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第二章</h1><p>编码路径正文。</p></body></html>"#,
+                CompressionMethod::Deflated,
+            ),
+        ];
+        for (name, content, compression) in entries {
+            writer
+                .start_file(
+                    name,
+                    SimpleFileOptions::default().compression_method(compression),
+                )
+                .expect("start EPUB entry");
+            writer
+                .write_all(content.as_bytes())
+                .expect("write EPUB entry");
         }
         writer.finish().expect("finish epub");
         (directory, path)

@@ -4025,6 +4025,7 @@ name = "readloom-slint"
 version = "0.1.0"
 dependencies = [
  "embed-resource",
+ "fontdb",
  "image",
  "readloom-core",
  "rfd",
@@ -4033,6 +4034,7 @@ dependencies = [
  "tempfile",
  "tray-icon",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

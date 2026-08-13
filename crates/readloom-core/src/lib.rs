@@ -1,15 +1,23 @@
 mod backup;
 mod core;
+mod editing;
 mod epub;
+mod epub_edit;
 mod reader;
 mod settings;
 mod text_codec;
+mod txt_edit;
 
 pub use backup::{BackupSummary, RestoreSummary};
 pub use core::{
     CoreError, LibraryDocument, LibraryGroup, LibrarySnapshot, ReadloomCore, StoredBookmark,
 };
+pub use editing::{
+    BlockId, ChapterKey, DocumentDraft, EditError, EditOperation, EditSession, EditableBlock,
+    SaveOutcome, SaveState, SaveTicket, ViewAnchor,
+};
 pub use epub::{EpubChapter, EpubDocument, EpubImageResource, EpubReadingLocator};
+pub use epub_edit::EpubDraft;
 pub use reader::{
     ParagraphKind, ReaderDocument, ReadingParagraph, SearchHit, TextReadingLocator, TxtChapter,
 };
@@ -19,6 +27,7 @@ pub use settings::{
     TxtLeadingIndent, TxtSettings, WindowCloseAction,
 };
 pub use text_codec::{LineEnding, SaveTextOptions, TextEncoding};
+pub use txt_edit::TxtDraft;
 
 #[cfg(test)]
 mod tests {
@@ -154,7 +163,7 @@ mod tests {
         let group = core
             .create_library_group("  长篇小说  ")
             .expect("create library group");
-        let second_group = core
+        let _second_group = core
             .create_library_group("历史")
             .expect("create second group");
         let third_group = core
@@ -169,13 +178,13 @@ mod tests {
                 .iter()
                 .map(|group| group.name.as_str())
                 .collect::<Vec<_>>(),
-            ["长篇小说", "历史", "随笔"]
+            ["随笔", "历史", "长篇小说"]
         );
         assert!(core.create_library_group("长篇小说").is_err());
         assert!(core.create_library_group("   ").is_err());
         assert!(
-            core.move_library_group(&third_group.group_id, -1)
-                .expect("move group up")
+            core.reorder_library_group(&third_group.group_id, 2)
+                .expect("move newest group to the end")
         );
         assert_eq!(
             core.library_snapshot(50)
@@ -184,16 +193,16 @@ mod tests {
                 .iter()
                 .map(|group| group.name.as_str())
                 .collect::<Vec<_>>(),
-            ["长篇小说", "随笔", "历史"]
-        );
-        assert!(
-            core.move_library_group(&group.group_id, 1)
-                .expect("move first group down")
+            ["历史", "长篇小说", "随笔"]
         );
         assert!(
             !core
-                .move_library_group(&second_group.group_id, 1)
-                .expect("last group cannot move down")
+                .reorder_library_group(&third_group.group_id, 2)
+                .expect("same position is unchanged")
+        );
+        assert!(
+            core.reorder_library_group(&group.group_id, 0)
+                .expect("move a group directly to the front")
         );
 
         let txt = directory.path().join("待分组.txt");
@@ -211,15 +220,22 @@ mod tests {
             Some(group.group_id.clone())
         );
         assert!(
-            core.move_library_book(&txt, None)
-                .expect("move back to ungrouped")
+            core.delete_library_group(&group.group_id)
+                .expect("delete populated group")
         );
-        assert_eq!(
-            core.library_snapshot(50)
-                .expect("load ungrouped library")
-                .documents[0]
-                .group_id,
-            None
+        let snapshot = core.library_snapshot(50).expect("load deleted group state");
+        assert!(
+            snapshot
+                .groups
+                .iter()
+                .all(|candidate| candidate.group_id != group.group_id)
+        );
+        assert_eq!(snapshot.documents[0].group_id, None);
+        assert!(txt.is_file(), "deleting a group must keep its source books");
+        assert!(
+            !core
+                .delete_library_group(&group.group_id)
+                .expect("deleting the same group twice is unchanged")
         );
     }
 

@@ -95,11 +95,16 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Result<DecodedText, CoreError> {
                 "无法可靠判断这个 TXT 文件的编码。".to_owned(),
             ));
         }
-        let content = guessed
+        let selected = if guessed == GB18030 || contains_gb18030_four_byte_sequence(bytes) {
+            GB18030
+        } else {
+            GBK
+        };
+        let content = selected
             .decode_without_bom_handling_and_without_replacement(bytes)
             .map(|text| text.into_owned())
             .ok_or_else(decode_error)?;
-        let encoding = if guessed == GBK {
+        let encoding = if selected == GBK {
             TextEncoding::Gbk
         } else {
             TextEncoding::Gb18030
@@ -113,6 +118,15 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Result<DecodedText, CoreError> {
         has_bom,
         line_ending,
         primary_line_ending,
+    })
+}
+
+fn contains_gb18030_four_byte_sequence(bytes: &[u8]) -> bool {
+    bytes.windows(4).any(|bytes| {
+        matches!(bytes[0], 0x81..=0xfe)
+            && bytes[1].is_ascii_digit()
+            && matches!(bytes[2], 0x81..=0xfe)
+            && bytes[3].is_ascii_digit()
     })
 }
 
@@ -291,5 +305,14 @@ mod tests {
         let error = encode_text("中文 😀", TextEncoding::Gbk, false, LineEnding::Lf)
             .expect_err("emoji is not GBK representable");
         assert!(error.to_string().contains("UTF-8"));
+    }
+
+    #[test]
+    fn gb18030_four_byte_sequences_are_not_downgraded_to_gbk() {
+        let bytes = encode_text("𠀀", TextEncoding::Gb18030, false, LineEnding::Lf)
+            .expect("encode GB18030 supplementary character");
+        let decoded = decode_text(&bytes).expect("decode GB18030");
+        assert_eq!(decoded.encoding, TextEncoding::Gb18030);
+        assert_eq!(decoded.content, "𠀀");
     }
 }

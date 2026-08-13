@@ -10,7 +10,8 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    AppSettings, EpubDocument, EpubReadingLocator, ReaderDocument, TextReadingLocator,
+    AppSettings, EpubDocument, EpubDraft, EpubReadingLocator, ReaderDocument, TextReadingLocator,
+    TxtDraft,
     text_codec::{LineEnding, SaveTextOptions, decode_text, encode_text},
 };
 
@@ -214,6 +215,7 @@ impl ReadloomCore {
         let bytes = encode_for_document(document, content, options)?;
         replace_file_safely(path, &bytes, expected)?;
         self.open_txt(path)
+            .map(|saved| saved.with_encoding_hint(options.encoding.unwrap_or(document.encoding())))
     }
 
     pub fn save_txt_as(
@@ -251,11 +253,50 @@ impl ReadloomCore {
             write_new_file_safely(&target, &bytes)?;
         }
         self.open_txt(&target)
+            .map(|saved| saved.with_encoding_hint(options.encoding.unwrap_or(document.encoding())))
+    }
+
+    pub fn save_txt_draft(
+        &self,
+        document: &ReaderDocument,
+        draft: &TxtDraft,
+    ) -> Result<ReaderDocument, CoreError> {
+        self.save_txt(document, &draft.materialize(), SaveTextOptions::PRESERVE)
+    }
+
+    pub fn save_txt_draft_as(
+        &self,
+        document: &ReaderDocument,
+        target: &Path,
+        draft: &TxtDraft,
+    ) -> Result<ReaderDocument, CoreError> {
+        self.save_txt_as(
+            document,
+            target,
+            &draft.materialize(),
+            SaveTextOptions::PRESERVE,
+        )
     }
 
     pub fn open_epub(&self, path: &Path) -> Result<EpubDocument, CoreError> {
         let canonical_path = fs::canonicalize(path)?;
         let document = EpubDocument::open(&canonical_path)?;
+        self.record_opened_epub(&document)?;
+        Ok(document)
+    }
+
+    pub fn save_epub_draft(&self, draft: &EpubDraft) -> Result<EpubDocument, CoreError> {
+        let document = crate::epub_edit::save_epub_draft(draft, draft.source_path())?;
+        self.record_opened_epub(&document)?;
+        Ok(document)
+    }
+
+    pub fn save_epub_draft_as(
+        &self,
+        draft: &EpubDraft,
+        target: &Path,
+    ) -> Result<EpubDocument, CoreError> {
+        let document = crate::epub_edit::save_epub_draft(draft, target)?;
         self.record_opened_epub(&document)?;
         Ok(document)
     }
@@ -362,7 +403,7 @@ impl ReadloomCore {
             return Err(CoreError::Validation("已经存在同名分组。".to_owned()));
         }
         let position = transaction.query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM library_groups",
+            "SELECT COALESCE(MIN(position), 1) - 1 FROM library_groups",
             [],
             |row| row.get::<_, i64>(0),
         )?;
@@ -418,44 +459,51 @@ impl ReadloomCore {
         Ok(updated > 0)
     }
 
-    pub fn move_library_group(&self, group_id: &str, direction: i32) -> Result<bool, CoreError> {
-        if direction == 0 {
-            return Ok(false);
+    pub fn delete_library_group(&self, group_id: &str) -> Result<bool, CoreError> {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            return Err(CoreError::Validation("分组标识不能为空。".to_owned()));
         }
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
-        let groups = {
+        let deleted =
+            transaction.execute("DELETE FROM library_groups WHERE group_id = ?1", [group_id])?;
+        transaction.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn reorder_library_group(
+        &self,
+        group_id: &str,
+        target_index: usize,
+    ) -> Result<bool, CoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction()?;
+        let mut group_ids = {
             let mut statement = transaction.prepare(
-                "SELECT group_id, position FROM library_groups
+                "SELECT group_id FROM library_groups
                  ORDER BY position ASC, name COLLATE NOCASE ASC",
             )?;
             statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?
+                .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let Some(index) = groups.iter().position(|(id, _)| id == group_id) else {
+        let Some(current_index) = group_ids.iter().position(|id| id == group_id) else {
             return Ok(false);
         };
-        let target = if direction < 0 {
-            index.checked_sub(1)
-        } else {
-            (index + 1 < groups.len()).then_some(index + 1)
-        };
-        let Some(target) = target else {
+        let target_index = target_index.min(group_ids.len().saturating_sub(1));
+        if current_index == target_index {
             return Ok(false);
-        };
-        let (current_id, current_position) = &groups[index];
-        let (target_id, target_position) = &groups[target];
-        transaction.execute(
-            "UPDATE library_groups SET position = ?1, updated_at_ms = ?2 WHERE group_id = ?3",
-            params![target_position, now_ms()?, current_id],
-        )?;
-        transaction.execute(
-            "UPDATE library_groups SET position = ?1, updated_at_ms = ?2 WHERE group_id = ?3",
-            params![current_position, now_ms()?, target_id],
-        )?;
+        }
+        let moved_group_id = group_ids.remove(current_index);
+        group_ids.insert(target_index, moved_group_id);
+        let timestamp = now_ms()?;
+        for (position, group_id) in group_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE library_groups SET position = ?1, updated_at_ms = ?2 WHERE group_id = ?3",
+                params![position as i64, timestamp, group_id],
+            )?;
+        }
         transaction.commit()?;
         Ok(true)
     }
@@ -1097,7 +1145,7 @@ fn replace_file_safely(target: &Path, bytes: &[u8], expected: &str) -> Result<()
     Ok(())
 }
 
-fn create_save_artifact(
+pub(crate) fn create_save_artifact(
     parent: &Path,
     file_name: &str,
     kind: &str,
@@ -1122,4 +1170,71 @@ fn create_save_artifact(
     Err(CoreError::Validation(
         "无法创建不冲突的 TXT 临时文件。".to_owned(),
     ))
+}
+
+pub(crate) fn install_validated_file(
+    target: &Path,
+    temporary_path: &Path,
+    expected_target: Option<&str>,
+    document_kind: &str,
+) -> Result<(), CoreError> {
+    if target.exists() && fs::metadata(target)?.permissions().readonly() {
+        let _ = fs::remove_file(temporary_path);
+        return Err(CoreError::Validation(format!(
+            "目标 {document_kind} 是只读文件，请取消只读属性后再保存。"
+        )));
+    }
+    let temporary_fingerprint = crate::epub::fingerprint_file(temporary_path)?;
+    match expected_target {
+        Some(expected) => {
+            if !target.exists() || crate::epub::fingerprint_file(target)? != expected {
+                let _ = fs::remove_file(temporary_path);
+                return Err(CoreError::Validation(format!(
+                    "{document_kind} 在保存过程中被其他程序修改，已取消覆盖。"
+                )));
+            }
+            let parent = target.parent().ok_or_else(|| {
+                CoreError::Validation(format!("{document_kind} 路径没有有效的父目录。"))
+            })?;
+            let file_name = target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| CoreError::Validation(format!("{document_kind} 文件名无效。")))?;
+            let (_, backup_path) = create_save_artifact(parent, file_name, "backup")?;
+            fs::remove_file(&backup_path)?;
+            if let Err(error) = fs::rename(target, &backup_path) {
+                let _ = fs::remove_file(temporary_path);
+                return Err(error.into());
+            }
+            if let Err(error) = fs::rename(temporary_path, target) {
+                let _ = fs::rename(&backup_path, target);
+                let _ = fs::remove_file(temporary_path);
+                return Err(error.into());
+            }
+            if crate::epub::fingerprint_file(target)? != temporary_fingerprint {
+                let _ = fs::remove_file(target);
+                let _ = fs::rename(&backup_path, target);
+                return Err(CoreError::Validation(format!(
+                    "保存后的 {document_kind} 校验失败，原文件已恢复。"
+                )));
+            }
+            let _ = fs::remove_file(backup_path);
+        }
+        None => {
+            if target.exists() {
+                let _ = fs::remove_file(temporary_path);
+                return Err(CoreError::Validation(
+                    "另存为目标在确认后已被创建，请重新选择文件名。".to_owned(),
+                ));
+            }
+            fs::rename(temporary_path, target)?;
+            if crate::epub::fingerprint_file(target)? != temporary_fingerprint {
+                let _ = fs::remove_file(target);
+                return Err(CoreError::Validation(format!(
+                    "另存为后的 {document_kind} 校验失败。"
+                )));
+            }
+        }
+    }
+    Ok(())
 }

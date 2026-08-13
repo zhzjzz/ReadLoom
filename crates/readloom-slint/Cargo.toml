@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 readloom-core = { path = "../readloom-core" }
+fontdb.workspace = true
 image.workspace = true
 rfd.workspace = true
 slint.workspace = true
@@ -22,3 +23,4 @@ windows-sys = { version = "=0.61.2", features = ["Win32_System_Registry"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+zip.workspace = true

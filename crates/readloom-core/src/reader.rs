@@ -8,6 +8,8 @@ pub enum ParagraphKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadingParagraph {
+    pub block_id: crate::BlockId,
+    pub editable: bool,
     pub kind: ParagraphKind,
     pub text: String,
     pub source_start: usize,
@@ -164,6 +166,8 @@ impl ReaderDocument {
                 trimmed.to_owned()
             };
             paragraphs.push(ReadingParagraph {
+                block_id: crate::BlockId::new(format!("txt:block:{}", paragraphs.len())),
+                editable: true,
                 kind,
                 text,
                 source_start,
@@ -249,8 +253,17 @@ impl ReaderDocument {
         self.primary_line_ending
     }
 
-    pub(crate) fn source_fingerprint(&self) -> Option<&str> {
+    pub fn fingerprint(&self) -> Option<&str> {
         self.source_fingerprint.as_deref()
+    }
+
+    pub(crate) fn source_fingerprint(&self) -> Option<&str> {
+        self.fingerprint()
+    }
+
+    pub(crate) fn with_encoding_hint(mut self, encoding: TextEncoding) -> Self {
+        self.encoding = encoding;
+        self
     }
 
     pub fn paragraphs(&self) -> &[ReadingParagraph] {

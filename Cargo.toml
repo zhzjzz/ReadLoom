@@ -13,6 +13,7 @@ license = "MIT"
 blake3 = "=1.8.5"
 chardetng = "=1.0.0"
 encoding_rs = "=0.8.35"
+fontdb = { version = "=0.23.0", default-features = false, features = ["std", "fs"] }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 quick-xml = { version = "=0.40.1", features = ["escape-html"] }
 regex = "=1.13.1"

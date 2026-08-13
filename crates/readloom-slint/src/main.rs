@@ -6,31 +6,43 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, mpsc},
+    sync::{Arc, OnceLock, mpsc},
     thread,
     time::Duration,
 };
 
 const READER_WINDOW_SIZE: usize = 96;
 const BACKGROUND_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(40);
-const EPUB_IMAGE_MAX_WIDTH: u32 = 1_200;
-const EPUB_IMAGE_MAX_HEIGHT: u32 = 1_200;
 const LIBRARY_COVER_MAX_WIDTH: u32 = 360;
 const LIBRARY_COVER_MAX_HEIGHT: u32 = 480;
 const EPUB_DECODED_IMAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const LIBRARY_COVER_CACHE_BYTES: usize = 24 * 1024 * 1024;
+const MAXIMUM_SEARCH_RESULTS: usize = 500;
 
 use readloom_core::{
-    AppSettings, AppTheme, ChapterTitleStyle, DEFAULT_TXT_CHAPTER_PATTERN, EpubDocument,
-    EpubImageResource, EpubReadingLocator, LibraryDocument, ParagraphKind, ReaderDocument,
-    ReadingParagraph, ReadingSettings, ReadloomCore, SaveTextOptions, SearchHit, TextAlignment,
-    TxtBlankLines, TxtLeadingIndent, WindowCloseAction,
+    AppSettings, AppTheme, BlockId, ChapterKey, ChapterTitleStyle, DEFAULT_TXT_CHAPTER_PATTERN,
+    DocumentDraft, EditSession, EpubDocument, EpubImageResource, EpubReadingLocator,
+    LibraryDocument, ParagraphKind, ReaderDocument, ReadingParagraph, ReadingSettings,
+    ReadloomCore, SaveTicket, SearchHit, TextAlignment, TxtBlankLines, TxtLeadingIndent,
+    ViewAnchor, WindowCloseAction,
 };
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer,
-    SharedString, Timer, TimerMode, VecModel,
+    CloseRequestResponse, ComponentHandle, Image, Model, ModelNotify, ModelRc, Rgba8Pixel,
+    SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel,
 };
+
+mod background_images;
+mod document_workspace;
+mod edit_session;
+mod reader_images;
+
+use background_images::{
+    BackgroundImageOperation, BackgroundImageRequest, spawn_background_image_worker,
+};
+use document_workspace::DocumentWorkspace;
+use edit_session::{ViewportAnchorController, byte_offset_for_utf16, utf16_offset_for_byte};
+use reader_images::{ReaderImageKey, ReaderImagePipeline};
 
 slint::include_modules!();
 
@@ -61,6 +73,20 @@ impl OpenDocument {
             Self::Epub(_) => "EPUB",
         }
     }
+
+    fn fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::Txt(document) => document.fingerprint(),
+            Self::Epub(document) => Some(document.fingerprint()),
+        }
+    }
+
+    fn paragraphs(&self) -> Arc<Vec<ReadingParagraph>> {
+        match self {
+            Self::Txt(document) => Arc::new(document.paragraphs().to_vec()),
+            Self::Epub(document) => document.paragraphs(),
+        }
+    }
 }
 
 struct DocumentLoadResult {
@@ -78,71 +104,19 @@ struct ChapterLoadResult {
 struct SearchTaskResult {
     request_id: u64,
     document_path: PathBuf,
-    epub: bool,
     query: String,
     hits: Vec<SearchHit>,
 }
 
-struct CachedDecodedImage {
-    image: Image,
-    decoded_bytes: usize,
-    last_used: u64,
+struct EditSaveResult {
+    source_path: PathBuf,
+    ticket: SaveTicket,
+    result: Result<OpenDocument, String>,
 }
 
-struct DecodedImageCache {
-    entries: HashMap<usize, CachedDecodedImage>,
-    decoded_bytes: usize,
-    maximum_bytes: usize,
-    clock: u64,
-}
-
-impl DecodedImageCache {
-    fn new(maximum_bytes: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            decoded_bytes: 0,
-            maximum_bytes,
-            clock: 0,
-        }
-    }
-
-    fn get(&mut self, key: usize) -> Option<Image> {
-        self.clock = self.clock.wrapping_add(1).max(1);
-        let entry = self.entries.get_mut(&key)?;
-        entry.last_used = self.clock;
-        Some(entry.image.clone())
-    }
-
-    fn insert(&mut self, key: usize, image: Image) {
-        if let Some(previous) = self.entries.remove(&key) {
-            self.decoded_bytes = self.decoded_bytes.saturating_sub(previous.decoded_bytes);
-        }
-        self.clock = self.clock.wrapping_add(1).max(1);
-        let decoded_bytes = decoded_image_bytes(&image);
-        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
-        self.entries.insert(
-            key,
-            CachedDecodedImage {
-                image,
-                decoded_bytes,
-                last_used: self.clock,
-            },
-        );
-        while self.decoded_bytes > self.maximum_bytes {
-            let Some(oldest_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| *key)
-            else {
-                break;
-            };
-            let Some(removed) = self.entries.remove(&oldest_key) else {
-                break;
-            };
-            self.decoded_bytes = self.decoded_bytes.saturating_sub(removed.decoded_bytes);
-        }
-    }
+struct SearchPresentation {
+    items: Vec<SearchItem>,
+    truncated: bool,
 }
 
 struct CachedLibraryCover {
@@ -210,28 +184,74 @@ impl LibraryCoverCache {
 thread_local! {
     static LIBRARY_COVER_CACHE: RefCell<LibraryCoverCache> =
         RefCell::new(LibraryCoverCache::new(LIBRARY_COVER_CACHE_BYTES));
+    static READER_IMAGE_PIPELINE: Rc<ReaderImagePipeline> =
+        ReaderImagePipeline::new(EPUB_DECODED_IMAGE_CACHE_BYTES);
 }
 
 struct ReaderParagraphModel {
     document: OpenDocument,
     epub_paragraphs: Option<Arc<Vec<ReadingParagraph>>>,
     epub_images: Option<Arc<Vec<EpubImageResource>>>,
+    epub_fingerprint: Option<Arc<str>>,
+    epub_chapter_index: usize,
+    edit: Option<Rc<RefCell<EditSession>>>,
     range: Range<usize>,
-    decoded_images: RefCell<DecodedImageCache>,
+    notify: ModelNotify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewportParagraphMatch {
+    index: usize,
+    chapter_index: usize,
+    inspected_paragraphs: usize,
+}
+
+fn resolve_viewport_paragraph(
+    presentation_model: Option<&ReaderParagraphModel>,
+    block_id: &BlockId,
+) -> Option<ViewportParagraphMatch> {
+    let presentation_model = presentation_model?;
+    presentation_model
+        .window_paragraphs()
+        .iter()
+        .enumerate()
+        .find(|(_, paragraph)| paragraph.block_id == *block_id)
+        .map(|(offset, paragraph)| ViewportParagraphMatch {
+            index: presentation_model.range.start + offset,
+            chapter_index: paragraph.chapter_index,
+            inspected_paragraphs: offset + 1,
+        })
 }
 
 impl ReaderParagraphModel {
+    #[cfg(test)]
     fn new(document: OpenDocument, range: Range<usize>) -> Self {
-        let (epub_paragraphs, epub_images) = match &document {
-            OpenDocument::Epub(document) => (Some(document.paragraphs()), Some(document.images())),
-            OpenDocument::Txt(_) => (None, None),
+        Self::new_with_edit(document, range, None)
+    }
+
+    fn new_with_edit(
+        document: OpenDocument,
+        range: Range<usize>,
+        edit: Option<Rc<RefCell<EditSession>>>,
+    ) -> Self {
+        let (epub_paragraphs, epub_images, epub_fingerprint, epub_chapter_index) = match &document {
+            OpenDocument::Epub(document) => (
+                Some(document.paragraphs()),
+                Some(document.images()),
+                Some(Arc::from(document.fingerprint())),
+                document.active_chapter_index(),
+            ),
+            OpenDocument::Txt(_) => (None, None, None, 0),
         };
         Self {
             document,
             epub_paragraphs,
             epub_images,
+            epub_fingerprint,
+            epub_chapter_index,
+            edit,
             range,
-            decoded_images: RefCell::new(DecodedImageCache::new(EPUB_DECODED_IMAGE_CACHE_BYTES)),
+            notify: ModelNotify::default(),
         }
     }
 
@@ -244,6 +264,11 @@ impl ReaderParagraphModel {
 
     fn window_paragraphs(&self) -> &[ReadingParagraph] {
         &self.paragraphs()[self.range.clone()]
+    }
+
+    fn presented_paragraph(&self, global_index: usize) -> Option<&ReadingParagraph> {
+        let offset = global_index.checked_sub(self.range.start)?;
+        self.window_paragraphs().get(offset)
     }
 
     fn paragraph_rows(&self) -> Vec<(usize, Option<usize>)> {
@@ -268,34 +293,63 @@ impl ReaderParagraphModel {
 
     fn paragraph_item(&self, paragraph: &ReadingParagraph) -> ParagraphItem {
         let image = match (&self.document, paragraph.image_index) {
-            (OpenDocument::Epub(_), Some(image_index)) => {
-                let cached = self.decoded_images.borrow_mut().get(image_index);
-                if let Some(cached) = cached {
-                    cached
-                } else {
-                    let image = self
-                        .epub_images
-                        .as_deref()
-                        .and_then(|images| images.get(image_index))
-                        .map(decode_epub_image)
-                        .unwrap_or_default();
-                    self.decoded_images
-                        .borrow_mut()
-                        .insert(image_index, image.clone());
-                    image
-                }
-            }
+            (OpenDocument::Epub(_), Some(image_index)) => self
+                .epub_images
+                .as_deref()
+                .and_then(|images| images.get(image_index))
+                .zip(self.epub_fingerprint.clone())
+                .map(|(resource, fingerprint)| {
+                    READER_IMAGE_PIPELINE.with(|pipeline| {
+                        pipeline.image_or_request(
+                            ReaderImageKey::new(fingerprint, self.epub_chapter_index, image_index),
+                            resource,
+                        )
+                    })
+                })
+                .unwrap_or_default(),
             _ => Image::default(),
         };
         let has_image = image.size().width > 0;
+        let text = self
+            .edit
+            .as_ref()
+            .and_then(|edit| {
+                edit.borrow()
+                    .draft()
+                    .block(&paragraph.block_id)
+                    .map(|block| block.text.clone())
+            })
+            .unwrap_or_else(|| paragraph.text.clone());
         ParagraphItem {
-            text: paragraph.text.clone().into(),
+            block_id: paragraph.block_id.as_str().into(),
+            editable: paragraph.editable,
+            text: text.into(),
             kind: paragraph_kind_name(paragraph.kind),
             index: as_i32(paragraph.paragraph_index),
             chapter_index: as_i32(paragraph.chapter_index),
             image,
             has_image,
         }
+    }
+
+    fn notify_ready_images(&self, ready: &[ReaderImageKey]) -> bool {
+        let Some(fingerprint) = self.epub_fingerprint.as_deref() else {
+            return false;
+        };
+        let mut changed = false;
+        for (local_row, paragraph) in self.window_paragraphs().iter().enumerate() {
+            let Some(image_index) = paragraph.image_index else {
+                continue;
+            };
+            if ready
+                .iter()
+                .any(|key| key.matches(fingerprint, self.epub_chapter_index, image_index))
+            {
+                self.notify.row_changed(local_row);
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -313,7 +367,7 @@ impl Model for ReaderParagraphModel {
     }
 
     fn model_tracker(&self) -> &dyn slint::ModelTracker {
-        &()
+        &self.notify
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -325,6 +379,7 @@ struct ReaderParagraphRowModel {
     paragraphs: ModelRc<ParagraphItem>,
     rows: Vec<(usize, Option<usize>)>,
     window_start: usize,
+    notify: ModelNotify,
 }
 
 impl ReaderParagraphRowModel {
@@ -354,7 +409,7 @@ impl Model for ReaderParagraphRowModel {
     }
 
     fn model_tracker(&self) -> &dyn slint::ModelTracker {
-        &()
+        &self.notify
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -366,34 +421,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = MainWindow::new()?;
     let core = Arc::new(ReadloomCore::open(&state_database_path())?);
     let settings = Rc::new(RefCell::new(core.load_settings()?));
-    let current_document = Rc::new(RefCell::new(None::<OpenDocument>));
-    let open_documents = Rc::new(RefCell::new(Vec::<OpenDocument>::new()));
+    let workspace = Rc::new(DocumentWorkspace::default());
     let (document_load_sender, document_load_receiver) = mpsc::channel::<DocumentLoadResult>();
     let (chapter_load_sender, chapter_load_receiver) = mpsc::channel::<ChapterLoadResult>();
     let (search_sender, search_receiver) = mpsc::channel::<SearchTaskResult>();
+    let (edit_save_sender, edit_save_receiver) = mpsc::channel::<EditSaveResult>();
+    let (background_image_sender, background_image_receiver) =
+        spawn_background_image_worker(core.clone());
     let active_load_request = Rc::new(Cell::new(0_u64));
     let active_chapter_request = Rc::new(Cell::new(0_u64));
     let active_search_request = Rc::new(Cell::new(0_u64));
+    let active_background_image_request = Rc::new(Cell::new(1_u64));
+    let viewport_anchors = Rc::new(RefCell::new(ViewportAnchorController::default()));
     let document_load_timer = Timer::default();
     apply_settings(&ui, &settings.borrow());
-    apply_background(&ui, &core);
+    {
+        let weak = ui.as_weak();
+        ui.on_request_geometry_measurement(move || {
+            if let Some(ui) = weak.upgrade() {
+                schedule_geometry_measurement(&ui);
+            }
+        });
+    }
+    let _ = background_image_sender.send(BackgroundImageRequest {
+        request_id: active_background_image_request.get(),
+        operation: BackgroundImageOperation::Load,
+        path: None,
+    });
     load_library(&ui, &core, settings.borrow().library_columns as usize)?;
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
         let document_load_sender = document_load_sender.clone();
         let active_load_request = active_load_request.clone();
         ui.on_open_document(move |path: SharedString| {
             if let Some(ui) = weak.upgrade() {
                 let requested_path = Path::new(path.as_str());
-                let already_open = {
-                    let documents = open_documents.borrow();
-                    documents
-                        .iter()
-                        .any(|document| document_path_matches(document, requested_path))
-                };
-                if already_open {
+                if workspace.contains(requested_path) {
                     ui.invoke_select_open_document(path);
                     return;
                 }
@@ -417,19 +482,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         ui.on_request_reader_window(move |target| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let Some(document) = current_document.borrow().as_ref().cloned() else {
+            let Some(document) = workspace.active() else {
                 return;
             };
             let target = target.max(0) as usize;
             let start = ui.get_reader_window_start().max(0) as usize;
             let end = start.saturating_add(ui.get_paragraphs().row_count());
             if target < start || target >= end {
-                set_reader_models(&ui, document, target);
+                let edit = workspace
+                    .active_session()
+                    .and_then(|session| session.edit_session());
+                set_reader_models(&ui, document, target, edit);
             }
             update_reader_target_row(&ui, target);
         });
@@ -437,17 +505,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_navigate_exact(move |index| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let document = session.presentation_document();
+            let paragraphs = document.paragraphs();
+            let Some(paragraph) = paragraphs.get(index.max(0) as usize) else {
+                return;
+            };
+            session.set_anchor(ViewAnchor {
+                chapter_key: ChapterKey::new(format!(
+                    "{}:{}",
+                    document.kind(),
+                    paragraph.chapter_index
+                )),
+                block_id: paragraph.block_id.clone(),
+                character_offset_utf16: 0,
+                pixel_offset_from_viewport_top: 0.0,
+            });
+            restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_reader_viewport_changed(move |viewport_y| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let document = session.presentation_document();
+            let current_index = ui.get_active_paragraph_index().max(0) as usize;
+            let Some(mut anchor) = viewport_anchors.borrow().capture(
+                ChapterKey::new(document.kind()),
+                None,
+                session
+                    .anchor()
+                    .map_or(0, |anchor| anchor.character_offset_utf16),
+                viewport_y,
+            ) else {
+                return;
+            };
+            let presentation_model = ui.get_paragraphs();
+            let paragraph_model = presentation_model
+                .as_any()
+                .downcast_ref::<ReaderParagraphModel>();
+            let Some(resolved) = resolve_viewport_paragraph(paragraph_model, &anchor.block_id)
+            else {
+                return;
+            };
+            anchor.chapter_key =
+                ChapterKey::new(format!("{}:{}", document.kind(), resolved.chapter_index));
+            session.set_anchor(anchor);
+            if resolved.index != current_index {
+                ui.set_active_paragraph_index(as_i32(resolved.index));
+                ui.invoke_reading_position_changed(as_i32(resolved.index));
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
         let chapter_load_sender = chapter_load_sender.clone();
         let active_chapter_request = active_chapter_request.clone();
         ui.on_open_epub_location(move |chapter_index, paragraph_index| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let active = current_document.borrow().as_ref().cloned();
+            let active = workspace.active();
             let Some(OpenDocument::Epub(document)) = active else {
                 return;
             };
+            if let Some(session) = workspace.active_session()
+                && session.editing()
+            {
+                if session.is_dirty() {
+                    ui.set_status_text("切换 EPUB 章节前请先保存或取消当前章节修改。".into());
+                    return;
+                }
+                session.cancel_edit();
+                ui.set_edit_mode(false);
+                ui.set_edit_dirty(false);
+            }
             let chapter_index = chapter_index.max(0) as usize;
             let paragraph_index = paragraph_index.max(0) as usize;
             let request_id = active_chapter_request.get().wrapping_add(1).max(1);
@@ -471,40 +621,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
         let active_load_request = active_load_request.clone();
         let active_chapter_request = active_chapter_request.clone();
         let active_search_request = active_search_request.clone();
+        let active_background_image_request = active_background_image_request.clone();
+        let viewport_anchors = viewport_anchors.clone();
         document_load_timer.start(TimerMode::Repeated, BACKGROUND_RESULT_POLL_INTERVAL, move || {
+            if let Some(ui) = weak.upgrade() {
+                refresh_ready_reader_images(&ui);
+            } else {
+                return;
+            }
             while let Ok(message) = document_load_receiver.try_recv() {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
                 match message.result {
                     Ok((opened, initial_index)) => {
-                        upsert_open_document(&open_documents, opened.clone());
+                        workspace.upsert(opened.clone());
                         let _ =
                             load_library(&ui, &core, ui.get_settings_library_columns() as usize);
                         if message.request_id == active_load_request.get() {
+                            viewport_anchors.borrow_mut().clear();
                             activate_open_document(
                                 &ui,
                                 &core,
-                                &current_document,
-                                &open_documents,
+                                &workspace,
                                 &opened,
                                 initial_index,
                             );
                         } else {
-                            let active_path = current_document
-                                .borrow()
-                                .as_ref()
-                                .and_then(|document| document.path().map(Path::to_path_buf));
-                            refresh_open_tabs(
-                                &ui,
-                                &open_documents.borrow(),
-                                active_path.as_deref(),
-                            );
+                            let active_path = workspace.active_path();
+                            refresh_open_tabs(&ui, &workspace.snapshot(), active_path.as_deref());
                         }
                     }
                     Err(error) if message.request_id == active_load_request.get() => {
@@ -517,7 +666,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
-                let active_matches = current_document.borrow().as_ref().is_some_and(|active| {
+                let active_matches = workspace.active().as_ref().is_some_and(|active| {
                     matches!(active, OpenDocument::Epub(document) if Arc::ptr_eq(document, &message.document))
                 });
                 if message.request_id != active_chapter_request.get() || !active_matches {
@@ -525,6 +674,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match message.result {
                     Ok(()) => {
+                        viewport_anchors.borrow_mut().clear();
                         let paragraph_index = message
                             .paragraph_index
                             .min(message.document.paragraphs().len().saturating_sub(1));
@@ -532,6 +682,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &ui,
                             OpenDocument::Epub(message.document.clone()),
                             paragraph_index,
+                            workspace
+                                .active_session()
+                                .and_then(|session| session.edit_session()),
                         );
                         let chapter_index = message.document.active_chapter_index();
                         ui.set_active_chapter_index(as_i32(chapter_index));
@@ -566,18 +719,121 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
-                let active_matches = current_document.borrow().as_ref().is_some_and(|active| {
+                let active_matches = workspace.active().as_ref().is_some_and(|active| {
                     active.path().is_some_and(|path| path == message.document_path)
                 });
                 if !active_matches {
                     continue;
                 }
-                let results = search_items(message.hits, message.epub);
-                let count = results.len();
-                ui.set_search_results(ModelRc::new(VecModel::from(results)));
-                ui.set_status_text(
-                    format!("“{}” · {} 个结果", message.query, count).into(),
-                );
+                let presentation = search_items(message.hits);
+                let count_label = if presentation.truncated {
+                    "500+".to_owned()
+                } else {
+                    presentation.items.len().to_string()
+                };
+                ui.set_search_results_truncated(presentation.truncated);
+                ui.set_search_results(ModelRc::new(VecModel::from(presentation.items)));
+                ui.set_status_text(format!("“{}” · {count_label} 个结果", message.query).into());
+            }
+            while let Ok(message) = edit_save_receiver.try_recv() {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let Some(session) = workspace.session(&message.source_path) else {
+                    continue;
+                };
+                match message.result {
+                    Ok(opened) => {
+                        let previous_path = message.source_path;
+                        let outcome = session.finish_save(&message.ticket, opened.clone());
+                        workspace.adopt_session_path(&previous_path, &opened);
+                        if workspace.active_session().is_some_and(|active| Rc::ptr_eq(&active, &session)) {
+                            ui.set_document_path(
+                                opened
+                                    .path()
+                                    .map_or_else(String::new, |path| path.to_string_lossy().into_owned())
+                                    .into(),
+                            );
+                            ui.set_document_title(opened.title().into());
+                            ui.set_edit_mode(true);
+                            ui.set_edit_dirty(outcome.as_ref().is_some_and(|outcome| outcome.still_dirty));
+                            update_edit_history_state(&ui, &session);
+                            ui.set_status_text(
+                                if outcome.as_ref().is_some_and(|outcome| outcome.still_dirty) {
+                                    "已保存提交时的版本；保存期间的新输入仍未保存。"
+                                } else {
+                                    "已安全保存，编辑位置与草稿会话保持不变。"
+                                }
+                                .into(),
+                            );
+                        }
+                        let should_continue = outcome
+                            .as_ref()
+                            .is_some_and(|outcome| !outcome.still_dirty)
+                            && !ui.get_dirty_confirm_action().is_empty()
+                            && ui.get_dirty_confirm_path().as_str() == previous_path.to_string_lossy();
+                        let active_path = workspace.active_path();
+                        refresh_open_tabs(&ui, &workspace.snapshot(), active_path.as_deref());
+                        let _ = load_library(&ui, &core, ui.get_settings_library_columns() as usize);
+                        if should_continue {
+                            ui.invoke_resolve_dirty_decision("continue".into());
+                        }
+                    }
+                    Err(error) => {
+                        let conflict = error.contains("其他程序修改")
+                            || error.contains("保存过程中被其他程序修改");
+                        if let Some(edit) = session.edit_session() {
+                            if conflict {
+                                edit.borrow_mut().mark_conflict(error.clone());
+                            } else {
+                                edit.borrow_mut().mark_error(error.clone());
+                            }
+                        }
+                        if workspace.active_session().is_some_and(|active| Rc::ptr_eq(&active, &session)) {
+                            ui.set_edit_dirty(true);
+                            ui.set_status_text(error.clone().into());
+                        }
+                        if !ui.get_dirty_confirm_action().is_empty() {
+                            ui.set_dirty_confirm_open(true);
+                        }
+                        if conflict {
+                            ui.set_save_conflict_message(error.into());
+                            ui.set_save_conflict_open(true);
+                        }
+                    }
+                }
+            }
+            while let Ok(message) = background_image_receiver.try_recv() {
+                if message.request_id != active_background_image_request.get() {
+                    continue;
+                }
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                match message.result {
+                    Ok(Some(pixels)) => {
+                        ui.set_settings_background_image(Image::from_rgba8(pixels));
+                        ui.set_settings_has_background(true);
+                        if message.operation == BackgroundImageOperation::Select {
+                            ui.set_status_text("背景图片已安全载入并保存。".into());
+                        }
+                    }
+                    Ok(None) => {
+                        ui.set_settings_background_image(Image::default());
+                        ui.set_settings_has_background(false);
+                        if message.operation == BackgroundImageOperation::Clear {
+                            ui.set_status_text("背景图片已清除。".into());
+                        }
+                    }
+                    Err(error) => {
+                        if message.operation == BackgroundImageOperation::Load {
+                            ui.set_settings_background_image(Image::default());
+                            ui.set_settings_has_background(false);
+                        }
+                        ui.set_status_text(error.into());
+                    }
+                }
+                ui.window().request_redraw();
             }
         });
     }
@@ -585,25 +841,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         ui.on_show_open_documents(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let first = open_documents.borrow().first().cloned();
+            let first = workspace.first();
             if let Some(document) = first {
-                let index = load_initial_index(&core, &document);
-                activate_open_document(
-                    &ui,
-                    &core,
-                    &current_document,
-                    &open_documents,
-                    &document,
-                    index,
-                );
+                viewport_anchors.borrow_mut().clear();
+                let index = load_session_index(&workspace, &core, &document);
+                activate_open_document(&ui, &core, &workspace, &document, index);
+                if let Some(session) = workspace.active_session() {
+                    restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
+                }
             } else {
-                *current_document.borrow_mut() = None;
+                workspace.clear_active();
                 show_empty_reader(&ui);
                 refresh_open_tabs(&ui, &[], None);
             }
@@ -613,71 +866,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         ui.on_select_open_document(move |path| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let selected = open_documents
-                .borrow()
-                .iter()
-                .find(|document| document_path_matches(document, Path::new(path.as_str())))
-                .cloned();
+            let selected = workspace.select(Path::new(path.as_str()));
             let Some(document) = selected else {
                 return;
             };
-            let index = load_initial_index(&core, &document);
-            activate_open_document(
-                &ui,
-                &core,
-                &current_document,
-                &open_documents,
-                &document,
-                index,
-            );
+            viewport_anchors.borrow_mut().clear();
+            let index = load_session_index(&workspace, &core, &document);
+            activate_open_document(&ui, &core, &workspace, &document, index);
+            if let Some(session) = workspace.active_session() {
+                restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
+            }
         });
     }
 
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         ui.on_close_open_document(move |path| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             let closing_path = Path::new(path.as_str());
-            let closing_active = current_document
-                .borrow()
-                .as_ref()
-                .is_some_and(|document| document_path_matches(document, closing_path));
-            open_documents
-                .borrow_mut()
-                .retain(|document| !document_path_matches(document, closing_path));
-            if closing_active {
-                let next = open_documents.borrow().first().cloned();
-                if let Some(document) = next {
-                    let index = load_initial_index(&core, &document);
-                    activate_open_document(
-                        &ui,
-                        &core,
-                        &current_document,
-                        &open_documents,
-                        &document,
-                        index,
-                    );
+            let closed = workspace.close(closing_path);
+            if closed.blocked_by_dirty_draft {
+                ui.set_dirty_confirm_action("close".into());
+                ui.set_dirty_confirm_path(path.clone());
+                ui.set_dirty_confirm_title(
+                    workspace
+                        .session(closing_path)
+                        .map_or_else(
+                            || "未命名文档".to_owned(),
+                            |session| session.document().title().to_owned(),
+                        )
+                        .into(),
+                );
+                ui.set_dirty_confirm_open(true);
+                return;
+            }
+            if closed.active_changed {
+                if let Some(document) = closed.active {
+                    viewport_anchors.borrow_mut().clear();
+                    let index = load_session_index(&workspace, &core, &document);
+                    activate_open_document(&ui, &core, &workspace, &document, index);
+                    if let Some(session) = workspace.active_session() {
+                        restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
+                    }
                 } else {
-                    *current_document.borrow_mut() = None;
                     show_empty_reader(&ui);
                 }
             }
-            let active_path = current_document
-                .borrow()
-                .as_ref()
-                .and_then(|document| document.path().map(Path::to_path_buf));
-            refresh_open_tabs(&ui, &open_documents.borrow(), active_path.as_deref());
+            let active_path = workspace.active_path();
+            refresh_open_tabs(&ui, &workspace.snapshot(), active_path.as_deref());
         });
     }
 
@@ -698,6 +945,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_status_text(format!("已创建分组“{}”。", group.name).into());
                     }
                 }
+                Err(error) => ui.set_status_text(error.to_string().into()),
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let core = core.clone();
+        ui.on_delete_library_group(move |group_id| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            match core.delete_library_group(group_id.as_str()) {
+                Ok(true) => {
+                    if ui.get_library_group_filter().as_str() == group_id.as_str() {
+                        ui.set_library_group_filter("all".into());
+                    }
+                    if let Err(error) =
+                        load_library(&ui, &core, ui.get_settings_library_columns() as usize)
+                    {
+                        ui.set_status_text(error.to_string().into());
+                    } else {
+                        ui.set_status_text("分组已删除，组内图书已移到“未分组”。".into());
+                    }
+                }
+                Ok(false) => ui.set_status_text("该分组已经不存在。".into()),
                 Err(error) => ui.set_status_text(error.to_string().into()),
             }
         });
@@ -729,12 +1002,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
+        ui.on_filter_library_groups(move |query| {
+            if let Some(ui) = weak.upgrade() {
+                filter_library_group_options(&ui, query.as_str());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
         let core = core.clone();
-        ui.on_move_library_group(move |group_id, direction| {
+        ui.on_reorder_library_group(move |group_id, target_index| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            match core.move_library_group(group_id.as_str(), direction) {
+            match core.reorder_library_group(group_id.as_str(), target_index.max(0) as usize) {
                 Ok(true) => {
                     if let Err(error) =
                         load_library(&ui, &core, ui.get_settings_library_columns() as usize)
@@ -744,7 +1026,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_status_text("分组位置已更新。".into());
                     }
                 }
-                Ok(false) => ui.set_status_text("该分组已经位于边界。".into()),
+                Ok(false) => ui.set_status_text("分组顺序没有变化。".into()),
                 Err(error) => ui.set_status_text(error.to_string().into()),
             }
         });
@@ -815,7 +1097,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         let search_sender = search_sender.clone();
         let active_search_request = active_search_request.clone();
         ui.on_search_text(move |query: SharedString| {
@@ -826,10 +1108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if query.is_empty() {
                 active_search_request.set(active_search_request.get().wrapping_add(1).max(1));
                 ui.set_search_results(empty_model());
+                ui.set_search_results_truncated(false);
                 ui.set_status_text("请输入搜索文字。".into());
                 return;
             }
-            let Some(document) = current_document.borrow().as_ref().cloned() else {
+            let Some(document) = workspace.active() else {
                 return;
             };
             let Some(document_path) = document.path().map(Path::to_path_buf) else {
@@ -840,15 +1123,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_status_text(format!("正在后台搜索“{query}”…").into());
             let sender = search_sender.clone();
             thread::spawn(move || {
-                let epub = matches!(document, OpenDocument::Epub(_));
                 let hits = match &document {
-                    OpenDocument::Txt(document) => document.search(&query, 500),
-                    OpenDocument::Epub(document) => document.search(&query, 500),
+                    OpenDocument::Txt(document) => {
+                        document.search(&query, MAXIMUM_SEARCH_RESULTS + 1)
+                    }
+                    OpenDocument::Epub(document) => {
+                        document.search(&query, MAXIMUM_SEARCH_RESULTS + 1)
+                    }
                 };
                 let _ = sender.send(SearchTaskResult {
                     request_id,
                     document_path,
-                    epub,
                     query,
                     hits,
                 });
@@ -860,11 +1145,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         ui.on_back_to_library(move || {
             if let Some(ui) = weak.upgrade() {
+                if ui.get_edit_dirty() {
+                    ui.set_dirty_confirm_action("library".into());
+                    ui.set_dirty_confirm_path(ui.get_document_path());
+                    ui.set_dirty_confirm_title(ui.get_document_title());
+                    ui.set_dirty_confirm_open(true);
+                    return;
+                }
                 ui.set_reader_open(false);
                 ui.set_settings_open(false);
-                ui.set_edit_content("".into());
                 ui.set_edit_mode(false);
                 ui.set_search_results(empty_model());
+                ui.set_search_results_truncated(false);
                 ui.set_status_text(
                     format!("已连接本地书库 · {} 本", ui.get_library_book_count()).into(),
                 );
@@ -876,19 +1168,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         let pending_position = Rc::new(RefCell::new(None::<(OpenDocument, usize)>));
         let save_timer = Rc::new(Timer::default());
         ui.on_reading_position_changed(move |index| {
             if index < 0 {
                 return;
             }
+            let active_document = workspace.active();
             if let Some(ui) = weak.upgrade()
-                && let Some(document) = current_document.borrow().as_ref()
+                && let Some(document) = active_document.as_ref()
             {
                 update_active_chapter(&ui, document, index as usize);
+                let presentation_model = ui.get_paragraphs();
+                let paragraph_model = presentation_model
+                    .as_any()
+                    .downcast_ref::<ReaderParagraphModel>();
+                if let Some(session) = workspace.active_session()
+                    && let Some(paragraph) =
+                        paragraph_model.and_then(|model| model.presented_paragraph(index as usize))
+                {
+                    let chapter_key =
+                        ChapterKey::new(format!("{}:{}", document.kind(), paragraph.chapter_index));
+                    if let Some(anchor) = viewport_anchors.borrow().capture(
+                        chapter_key,
+                        Some(&paragraph.block_id),
+                        session
+                            .anchor()
+                            .map_or(0, |anchor| anchor.character_offset_utf16),
+                        ui.get_reader_viewport_y(),
+                    ) {
+                        session.set_anchor(anchor);
+                    }
+                }
             }
-            let active_document = current_document.borrow().as_ref().cloned();
             let Some(active_document) = active_document else {
                 return;
             };
@@ -920,12 +1234,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         ui.on_previous_chapter(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let active = current_document.borrow().as_ref().cloned();
+            let active = workspace.active();
             match active {
                 Some(OpenDocument::Epub(document)) => {
                     if let Some(chapter) = document.active_chapter_index().checked_sub(1) {
@@ -950,12 +1264,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         ui.on_next_chapter(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let active = current_document.borrow().as_ref().cloned();
+            let active = workspace.active();
             match active {
                 Some(OpenDocument::Epub(document)) => {
                     let chapter = document.active_chapter_index().saturating_add(1);
@@ -982,13 +1296,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         ui.on_add_bookmark(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             let index = ui.get_active_paragraph_index().max(0) as usize;
-            let active = current_document.borrow().as_ref().cloned();
+            let active = workspace.active();
             let result = match active.as_ref() {
                 Some(OpenDocument::Txt(document)) => core.add_text_bookmark(document, index),
                 Some(OpenDocument::Epub(document)) => core.add_epub_bookmark(document, index),
@@ -1009,15 +1323,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
         ui.on_delete_bookmark(move |bookmark_id| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             match core.delete_bookmark(bookmark_id.as_str()) {
                 Ok(true) => {
-                    if let Some(document) = current_document.borrow().as_ref() {
-                        load_bookmarks(&ui, &core, document);
+                    if let Some(document) = workspace.active() {
+                        load_bookmarks(&ui, &core, &document);
                     }
                     ui.set_status_text("书签已删除。".into());
                 }
@@ -1070,10 +1384,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let core = core.clone();
+        let workspace = workspace.clone();
         ui.on_remove_library_book(move |path: SharedString, title: SharedString| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if workspace
+                .session(Path::new(path.as_str()))
+                .is_some_and(|session| session.is_dirty())
+            {
+                ui.set_dirty_confirm_action("remove".into());
+                ui.set_dirty_confirm_path(path);
+                ui.set_dirty_confirm_title(title);
+                ui.set_dirty_confirm_open(true);
+                return;
+            }
             match core.remove_from_library(Path::new(path.as_str())) {
                 Ok(true) => {
                     if let Err(error) =
@@ -1108,62 +1433,132 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let controller = viewport_anchors.clone();
+        ui.on_report_block_geometry(move |block_id, y, height| {
+            if !block_id.as_str().is_empty() {
+                controller
+                    .borrow_mut()
+                    .report_geometry(BlockId::new(block_id.as_str()), y, height);
+            }
+        });
+    }
+
+    {
+        let workspace = workspace.clone();
+        ui.on_capture_view_anchor(move |block_id, caret_byte, pixel_offset| {
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let Some(edit) = session.edit_session() else {
+                return;
+            };
+            let block_id = BlockId::new(block_id.as_str());
+            let (chapter_key, caret_utf16) = {
+                let edit = edit.borrow();
+                let Some(block) = edit.draft().block(&block_id) else {
+                    return;
+                };
+                (
+                    block.chapter_key.clone(),
+                    utf16_offset_for_byte(&block.text, caret_byte.max(0) as usize),
+                )
+            };
+            let anchor = ViewAnchor {
+                chapter_key,
+                block_id,
+                character_offset_utf16: caret_utf16,
+                pixel_offset_from_viewport_top: pixel_offset,
+            };
+            session.set_anchor(anchor);
+        });
+    }
+
+    {
         let weak = ui.as_weak();
-        let current_document = current_document.clone();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         ui.on_request_edit_mode(move |enabled| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let edit_content = match current_document.borrow().as_ref() {
-                Some(OpenDocument::Txt(document)) if enabled => document.content().into(),
-                Some(OpenDocument::Txt(_)) => SharedString::default(),
-                _ => return,
+            let Some(session) = workspace.active_session() else {
+                return;
             };
-            ui.set_edit_content(edit_content);
-            ui.set_edit_mode(enabled);
-            ui.set_status_text(
-                if enabled {
-                    "TXT 编辑模式 · 保存时会保留原编码与主换行格式。"
-                } else {
-                    "已取消本次编辑。"
+            let document = session.presentation_document();
+            let active_index = ui.get_active_paragraph_index().max(0) as usize;
+            let paragraphs = document.paragraphs();
+            let Some(paragraph) = paragraphs.get(active_index) else {
+                return;
+            };
+            let block_id = paragraph.block_id.clone();
+            let chapter_key =
+                ChapterKey::new(format!("{}:{}", document.kind(), paragraph.chapter_index));
+            let anchor = viewport_anchors
+                .borrow()
+                .capture(
+                    chapter_key.clone(),
+                    Some(&block_id),
+                    session
+                        .anchor()
+                        .map_or(0, |anchor| anchor.character_offset_utf16),
+                    ui.get_reader_viewport_y(),
+                )
+                .unwrap_or(ViewAnchor {
+                    chapter_key,
+                    block_id,
+                    character_offset_utf16: 0,
+                    pixel_offset_from_viewport_top: 0.0,
+                });
+            if enabled {
+                if let Err(error) = session.begin_edit(anchor) {
+                    ui.set_status_text(error.into());
+                    return;
                 }
-                .into(),
-            );
+                if let Some(edit) = session.edit_session() {
+                    viewport_anchors
+                        .borrow_mut()
+                        .set_blocks(edit.borrow().draft().blocks());
+                }
+                set_reader_models(&ui, document, active_index, session.edit_session());
+                ui.set_edit_mode(true);
+                ui.set_edit_dirty(session.is_dirty());
+                update_edit_history_state(&ui, &session);
+                ui.set_status_text("内联编辑已启用；背景、图片和当前阅读画布保持挂载。".into());
+            } else {
+                session.cancel_edit();
+                set_reader_models(&ui, document, active_index, None);
+                ui.set_edit_mode(false);
+                ui.set_edit_dirty(false);
+                ui.set_edit_can_undo(false);
+                ui.set_edit_can_redo(false);
+                ui.set_status_text("已放弃本次修改，阅读位置保持不变。".into());
+            }
+            restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
         });
     }
 
     {
         let weak = ui.as_weak();
-        let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
-        ui.on_save_edited_text(move |content: SharedString| {
+        let workspace = workspace.clone();
+        ui.on_replace_block_text(move |block_id, text, caret_byte| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let saved = {
-                let document = current_document.borrow();
-                match document.as_ref() {
-                    Some(OpenDocument::Txt(document)) => {
-                        core.save_txt(document, content.as_str(), SaveTextOptions::PRESERVE)
-                    }
-                    _ => return,
-                }
+            let Some(session) = workspace.active_session() else {
+                return;
             };
-            match saved {
-                Ok(document) => {
-                    let opened = OpenDocument::Txt(Arc::new(document));
-                    let index = ui.get_active_paragraph_index().max(0) as usize;
-                    upsert_open_document(&open_documents, opened.clone());
-                    activate_open_document(
-                        &ui,
-                        &core,
-                        &current_document,
-                        &open_documents,
-                        &opened,
-                        index,
-                    );
-                    ui.set_status_text("TXT 已安全保存，并重新校验编码与文件指纹。".into());
+            let block_id = BlockId::new(block_id.as_str());
+            let caret_utf16 = utf16_offset_for_byte(text.as_str(), caret_byte.max(0) as usize);
+            match session.replace_block_text(&block_id, text.as_str().to_owned(), caret_utf16) {
+                Ok(changed) => {
+                    if changed {
+                        ui.set_edit_dirty(true);
+                        update_edit_history_state(&ui, &session);
+                        ui.set_status_text(
+                            "草稿已更新 · Enter 为块内换行，暂不支持跨段合并。".into(),
+                        );
+                        schedule_geometry_measurement(&ui);
+                    }
                 }
                 Err(error) => ui.set_status_text(error.to_string().into()),
             }
@@ -1172,75 +1567,215 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_undo_edit(move || {
+            apply_edit_history_step(&weak, &workspace, &viewport_anchors, true);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_redo_edit(move || {
+            apply_edit_history_step(&weak, &workspace, &viewport_anchors, false);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
         let core = core.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
-        ui.on_save_edited_text_as(move |content: SharedString| {
+        let workspace = workspace.clone();
+        let sender = edit_save_sender.clone();
+        ui.on_save_document(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let suggested_name = current_document
-                .borrow()
-                .as_ref()
-                .and_then(|document| match document {
-                    OpenDocument::Txt(document) => document
-                        .path()
-                        .and_then(|path| path.file_name())
-                        .and_then(|name| name.to_str())
-                        .map(str::to_owned),
-                    OpenDocument::Epub(_) => None,
-                })
-                .unwrap_or_else(|| "未命名.txt".to_owned());
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("TXT 文本", &["txt"])
-                .set_file_name(suggested_name)
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let source_path = session.path();
+            let Some((document, ticket)) = session.begin_save() else {
+                return;
+            };
+            ui.set_status_text("正在后台安全保存…".into());
+            let core = core.clone();
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let result = save_edit_ticket(&core, &document, &ticket, None);
+                let _ = sender.send(EditSaveResult {
+                    source_path,
+                    ticket,
+                    result,
+                });
+            });
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let core = core.clone();
+        let workspace = workspace.clone();
+        let sender = edit_save_sender.clone();
+        ui.on_save_document_as(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let source_path = session.path();
+            let extension = source_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("txt");
+            let file_name = source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("未命名.txt");
+            let label = if extension.eq_ignore_ascii_case("epub") {
+                "EPUB 电子书"
+            } else {
+                "TXT 文本"
+            };
+            let Some(target) = rfd::FileDialog::new()
+                .add_filter(label, &[extension])
+                .set_file_name(file_name)
                 .save_file()
             else {
                 return;
             };
-            let previous_path = current_document
-                .borrow()
-                .as_ref()
-                .and_then(|document| document.path().map(Path::to_path_buf));
-            let saved = {
-                let document = current_document.borrow();
-                match document.as_ref() {
-                    Some(OpenDocument::Txt(document)) => core.save_txt_as(
-                        document,
-                        &path,
-                        content.as_str(),
-                        SaveTextOptions::PRESERVE,
-                    ),
-                    _ => return,
-                }
+            let Some((document, ticket)) = session.begin_save() else {
+                return;
             };
-            match saved {
-                Ok(document) => {
-                    if let Some(previous_path) = previous_path.as_deref() {
-                        open_documents
-                            .borrow_mut()
-                            .retain(|open| !document_path_matches(open, previous_path));
-                    }
-                    let opened = OpenDocument::Txt(Arc::new(document));
-                    upsert_open_document(&open_documents, opened.clone());
-                    activate_open_document(
-                        &ui,
-                        &core,
-                        &current_document,
-                        &open_documents,
-                        &opened,
-                        0,
-                    );
-                    ui.set_status_text("TXT 已另存并切换到新文件。".into());
-                    let _ = load_library(&ui, &core, ui.get_settings_library_columns() as usize);
+            ui.set_status_text("正在后台安全另存为…".into());
+            let core = core.clone();
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let result = save_edit_ticket(&core, &document, &ticket, Some(&target));
+                let _ = sender.send(EditSaveResult {
+                    source_path,
+                    ticket,
+                    result,
+                });
+            });
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let core = core.clone();
+        let workspace = workspace.clone();
+        let sender = edit_save_sender.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_resolve_dirty_decision(move |decision| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if decision.as_str() == "cancel" {
+                ui.set_dirty_confirm_open(false);
+                ui.set_dirty_confirm_action("".into());
+                ui.set_dirty_confirm_path("".into());
+                return;
+            }
+            let action = ui.get_dirty_confirm_action().to_string();
+            let path = PathBuf::from(ui.get_dirty_confirm_path().as_str());
+            let Some(session) = workspace.session(&path) else {
+                ui.set_dirty_confirm_open(false);
+                ui.set_dirty_confirm_action("".into());
+                return;
+            };
+            if decision.as_str() == "save" {
+                let Some((document, ticket)) = session.begin_save() else {
+                    return;
+                };
+                ui.set_dirty_confirm_open(false);
+                ui.set_status_text("正在后台保存，完成后继续刚才的操作…".into());
+                let core = core.clone();
+                let sender = sender.clone();
+                thread::spawn(move || {
+                    let result = save_edit_ticket(&core, &document, &ticket, None);
+                    let _ = sender.send(EditSaveResult {
+                        source_path: path,
+                        ticket,
+                        result,
+                    });
+                });
+                return;
+            }
+            if decision.as_str() == "discard" {
+                session.cancel_edit();
+                if workspace
+                    .active_session()
+                    .is_some_and(|active| Rc::ptr_eq(&active, &session))
+                {
+                    let document = session.document();
+                    let index = ui.get_active_paragraph_index().max(0) as usize;
+                    set_reader_models(&ui, document, index, None);
+                    ui.set_edit_mode(false);
+                    ui.set_edit_dirty(false);
+                    ui.set_edit_can_undo(false);
+                    ui.set_edit_can_redo(false);
+                    restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
                 }
-                Err(error) => ui.set_status_text(error.to_string().into()),
+            }
+            ui.set_dirty_confirm_open(false);
+            ui.set_dirty_confirm_action("".into());
+            ui.set_dirty_confirm_path("".into());
+            continue_dirty_action(&ui, &core, &workspace, &viewport_anchors, &action, &path);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let core = core.clone();
+        let workspace = workspace.clone();
+        let document_load_sender = document_load_sender.clone();
+        let active_load_request = active_load_request.clone();
+        ui.on_resolve_save_conflict(move |decision| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            match decision.as_str() {
+                "cancel" => ui.set_save_conflict_open(false),
+                "save-as" => {
+                    ui.set_save_conflict_open(false);
+                    ui.invoke_save_document_as();
+                }
+                "reload" => {
+                    let Some(session) = workspace.active_session() else {
+                        return;
+                    };
+                    let path = session.path();
+                    session.cancel_edit();
+                    let request_id = active_load_request.get().wrapping_add(1).max(1);
+                    active_load_request.set(request_id);
+                    ui.set_edit_mode(false);
+                    ui.set_edit_dirty(false);
+                    ui.set_save_conflict_open(false);
+                    ui.set_status_text("正在后台重新加载外部版本…".into());
+                    let core = core.clone();
+                    let sender = document_load_sender.clone();
+                    thread::spawn(move || {
+                        let result = load_document_for_open(&core, &path);
+                        let _ = sender.send(DocumentLoadResult { request_id, result });
+                    });
+                }
+                _ => {}
             }
         });
     }
 
-    install_settings_handlers(&ui, &core, &settings, &current_document, &open_documents);
-    install_window_behavior(&ui, &settings, &core, &current_document);
+    install_settings_handlers(
+        &ui,
+        &core,
+        &settings,
+        &workspace,
+        &background_image_sender,
+        &active_background_image_request,
+    );
+    install_window_behavior(&ui, &settings, &workspace);
     let (_tray_icon, _tray_timer) = match install_tray(&ui) {
         Ok(value) => value,
         Err(error) => {
@@ -1255,17 +1790,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedReadingFont {
+    family: String,
+    fallback: bool,
+}
+
+fn installed_font_families() -> &'static HashMap<String, String> {
+    static FAMILIES: OnceLock<HashMap<String, String>> = OnceLock::new();
+    FAMILIES.get_or_init(|| {
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        database
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(family, _)| family))
+            .fold(HashMap::new(), |mut families, family| {
+                families
+                    .entry(family.to_lowercase())
+                    .or_insert_with(|| family.clone());
+                families
+            })
+    })
+}
+
+fn reading_font_candidates(font_id: &str) -> &'static [&'static str] {
+    match font_id {
+        "source-han-serif" => &[
+            "Source Han Serif SC",
+            "Noto Serif CJK SC",
+            "Noto Serif SC",
+            "SimSun",
+        ],
+        "noto-serif-cjk" => &[
+            "Noto Serif CJK SC",
+            "Noto Serif SC",
+            "Source Han Serif SC",
+            "SimSun",
+        ],
+        "source-han-sans" => &[
+            "Source Han Sans SC",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Microsoft YaHei UI",
+        ],
+        "noto-sans-cjk" => &[
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Source Han Sans SC",
+            "Microsoft YaHei UI",
+        ],
+        "lxgw-wenkai" => &[
+            "LXGW WenKai",
+            "霞鹜文楷",
+            "KaiTi",
+            "Noto Serif SC",
+            "SimSun",
+        ],
+        _ => &["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"],
+    }
+}
+
+fn resolve_reading_font(font_id: &str) -> ResolvedReadingFont {
+    let candidates = reading_font_candidates(font_id);
+    let installed = installed_font_families();
+    let selected = candidates
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            installed
+                .get(&candidate.to_lowercase())
+                .map(|family| (index, family.clone()))
+        });
+    match selected {
+        Some((index, family)) => ResolvedReadingFont {
+            family,
+            fallback: font_id != "system" && index > 0,
+        },
+        None => ResolvedReadingFont {
+            family: "Microsoft YaHei UI".to_owned(),
+            fallback: font_id != "system",
+        },
+    }
+}
+
+fn indentation_prefix(indent_em: f32) -> String {
+    let quarters = (indent_em.clamp(0.0, 4.0) * 4.0).round() as usize;
+    let mut prefix = "　".repeat(quarters / 4);
+    prefix.push_str(&" ".repeat(quarters % 4));
+    prefix
+}
+
+fn clamp_reading_preview(settings: &mut AppSettings) {
+    settings.background_opacity = settings.background_opacity.clamp(0.0, 1.0);
+    settings.reading.font_size = settings.reading.font_size.clamp(12, 36);
+    settings.reading.font_weight = settings.reading.font_weight.clamp(300, 700);
+    settings.reading.letter_spacing =
+        (settings.reading.letter_spacing.clamp(-0.05, 0.3) * 100.0).round() / 100.0;
+    settings.reading.first_line_indent =
+        (settings.reading.first_line_indent.clamp(0.0, 4.0) * 4.0).round() / 4.0;
+    settings.reading.line_height =
+        (settings.reading.line_height.clamp(1.2, 2.4) * 20.0).round() / 20.0;
+    settings.reading.paragraph_spacing =
+        (settings.reading.paragraph_spacing.clamp(0.0, 1.5) * 20.0).round() / 20.0;
+    settings.reading.content_width = settings.reading.content_width.clamp(480, 1280);
+    settings.reading.horizontal_margin = settings.reading.horizontal_margin.clamp(8, 160);
+    settings.reading.vertical_margin = settings.reading.vertical_margin.clamp(8, 120);
+}
+
 fn install_window_behavior(
     ui: &MainWindow,
     settings: &Rc<RefCell<AppSettings>>,
-    core: &Arc<ReadloomCore>,
-    current_document: &Rc<RefCell<Option<OpenDocument>>>,
+    workspace: &Rc<DocumentWorkspace>,
 ) {
     {
         let weak = ui.as_weak();
         let settings = settings.clone();
+        let workspace = workspace.clone();
         ui.window().on_close_requested(move || {
-            if settings.borrow().close_action == WindowCloseAction::Tray {
+            if workspace.has_dirty_drafts() {
+                if let Some(ui) = weak.upgrade() {
+                    let dirty = workspace.snapshot().into_iter().find(|document| {
+                        document
+                            .path()
+                            .and_then(|path| workspace.session(path))
+                            .is_some_and(|session| session.is_dirty())
+                    });
+                    if let Some(document) = dirty {
+                        ui.set_dirty_confirm_action("exit".into());
+                        ui.set_dirty_confirm_path(
+                            document
+                                .path()
+                                .map_or_else(String::new, |path| {
+                                    path.to_string_lossy().into_owned()
+                                })
+                                .into(),
+                        );
+                        ui.set_dirty_confirm_title(document.title().into());
+                        ui.set_dirty_confirm_open(true);
+                    }
+                }
+                CloseRequestResponse::KeepWindowShown
+            } else if settings.borrow().close_action == WindowCloseAction::Tray {
                 if let Some(ui) = weak.upgrade() {
                     let _ = ui.hide();
                     ui.set_status_text("窗口已隐藏到系统托盘。".into());
@@ -1280,8 +1945,6 @@ fn install_window_behavior(
     {
         let weak = ui.as_weak();
         let settings = settings.clone();
-        let core = core.clone();
-        let current_document = current_document.clone();
         let modifiers = Rc::new(Cell::new(winit::keyboard::ModifiersState::default()));
         let event_modifiers = modifiers.clone();
         ui.window().on_winit_window_event(move |window, event| {
@@ -1296,16 +1959,47 @@ fn install_window_behavior(
             } else if let winit::event::WindowEvent::KeyboardInput { event, is_synthetic, .. } = event
                 && !is_synthetic
                 && event.state == winit::event::ElementState::Pressed
+                && !event.repeat
                 && let Some(shortcut) = shortcut_from_key_event(&event.logical_key, modifiers.get())
                 && let Some(ui) = weak.upgrade()
-                && dispatch_shortcut(&ui, &core, &current_document, &settings.borrow(), &shortcut)
             {
-                EventResult::PreventDefault
+                let capture_action = ui.get_shortcut_capture_action();
+                if !capture_action.is_empty() {
+                    ui.set_shortcut_capture_action("".into());
+                    if shortcut.ends_with("Escape") {
+                        ui.set_status_text("已取消快捷键录入。".into());
+                    } else if shortcut.ends_with("Backspace") || shortcut.ends_with("Delete") {
+                        ui.invoke_set_shortcut(capture_action, "".into());
+                    } else {
+                        ui.invoke_set_shortcut(capture_action, shortcut.into());
+                    }
+                    EventResult::PreventDefault
+                } else if dispatch_editing_shortcut(&ui, &shortcut)
+                    || dispatch_shortcut(&ui, &settings.borrow(), &shortcut)
+                {
+                    EventResult::PreventDefault
+                } else {
+                    EventResult::Propagate
+                }
             } else {
                 EventResult::Propagate
             }
         });
     }
+}
+
+fn dispatch_editing_shortcut(ui: &MainWindow, shortcut: &str) -> bool {
+    if !ui.get_edit_mode() {
+        return false;
+    }
+    match shortcut.to_ascii_lowercase().as_str() {
+        "ctrl+s" => ui.invoke_save_document(),
+        "ctrl+shift+s" => ui.invoke_save_document_as(),
+        "ctrl+z" => ui.invoke_undo_edit(),
+        "ctrl+y" | "ctrl+shift+z" => ui.invoke_redo_edit(),
+        _ => return false,
+    }
+    true
 }
 
 fn install_window_icon(ui: &MainWindow) -> Result<(), Box<dyn std::error::Error>> {
@@ -1344,6 +2038,9 @@ fn shortcut_from_key_event(
         Key::Named(NamedKey::Home) => "Home".to_owned(),
         Key::Named(NamedKey::End) => "End".to_owned(),
         Key::Named(NamedKey::Space) => "Space".to_owned(),
+        Key::Named(NamedKey::Escape) => "Escape".to_owned(),
+        Key::Named(NamedKey::Backspace) => "Backspace".to_owned(),
+        Key::Named(NamedKey::Delete) => "Delete".to_owned(),
         _ => return None,
     };
     let mut parts = Vec::new();
@@ -1363,13 +2060,7 @@ fn shortcut_from_key_event(
     Some(parts.join("+"))
 }
 
-fn dispatch_shortcut(
-    ui: &MainWindow,
-    core: &ReadloomCore,
-    current_document: &RefCell<Option<OpenDocument>>,
-    settings: &AppSettings,
-    shortcut: &str,
-) -> bool {
+fn dispatch_shortcut(ui: &MainWindow, settings: &AppSettings, shortcut: &str) -> bool {
     let action = readloom_core::ShortcutSettings::ACTIONS
         .into_iter()
         .find_map(|(action, _)| {
@@ -1386,32 +2077,28 @@ fn dispatch_shortcut(
     };
     match action {
         "open" => ui.invoke_open_file(),
-        "save" if ui.get_edit_mode() => ui.invoke_save_edited_text(ui.get_edit_content()),
-        "saveAs" if ui.get_edit_mode() => ui.invoke_save_edited_text_as(ui.get_edit_content()),
-        "close" => ui.invoke_back_to_library(),
-        "toggleEdit" if ui.get_reader_open() && ui.get_document_kind() == "TXT" => {
+        "save" if ui.get_edit_mode() => ui.invoke_save_document(),
+        "saveAs" if ui.get_edit_mode() => ui.invoke_save_document_as(),
+        "close" if ui.get_reader_open() => {
+            ui.invoke_close_open_document(ui.get_document_path());
+        }
+        "toggleEdit" if ui.get_reader_open() => {
             ui.invoke_request_edit_mode(!ui.get_edit_mode());
         }
         "previousChapter" => navigate_chapter(ui, false),
         "nextChapter" => navigate_chapter(ui, true),
-        "bookmark" => {
-            let index = ui.get_active_paragraph_index().max(0) as usize;
-            let result = match current_document.borrow().as_ref() {
-                Some(OpenDocument::Txt(document)) => core.add_text_bookmark(document, index),
-                Some(OpenDocument::Epub(document)) => core.add_epub_bookmark(document, index),
-                None => return true,
-            };
-            match result {
-                Ok(()) => ui.set_status_text("书签已添加到当前位置。".into()),
-                Err(error) => ui.set_status_text(error.to_string().into()),
-            }
-        }
+        "bookmark" if ui.get_reader_open() => ui.invoke_add_bookmark(),
         "showLibrary" => ui.invoke_back_to_library(),
         "showSettings" => {
-            ui.set_settings_open(true);
             ui.set_settings_section("reading.typography".into());
-            ui.set_edit_content("".into());
-            ui.set_edit_mode(false);
+            if ui.get_edit_dirty() {
+                ui.set_dirty_confirm_action("settings".into());
+                ui.set_dirty_confirm_path(ui.get_document_path());
+                ui.set_dirty_confirm_title(ui.get_document_title());
+                ui.set_dirty_confirm_open(true);
+            } else {
+                ui.set_settings_open(true);
+            }
         }
         _ => ui.set_status_text("当前状态无法执行该快捷键。".into()),
     }
@@ -1560,7 +2247,6 @@ fn load_library(
                 path: document.path.into(),
                 kind: document.document_kind.to_uppercase().into(),
                 available: document.available,
-                group_index: as_i32(group_index),
                 group_name: shelves[group_index].name.clone(),
                 cover: cover.unwrap_or_default(),
                 has_cover,
@@ -1583,6 +2269,8 @@ fn load_library(
             has_fifth: books.len() > 4,
         })
         .collect::<Vec<_>>();
+    ui.set_library_group_targets(ModelRc::new(VecModel::from(shelves[1..].to_vec())));
+    ui.set_library_group_filter_options(ModelRc::new(VecModel::from(shelves.clone())));
     ui.set_library_shelves(ModelRc::new(VecModel::from(shelves)));
     ui.set_library_book_rows(ModelRc::new(VecModel::from(book_rows)));
     ui.set_library_book_count(as_i32(book_count));
@@ -1595,6 +2283,16 @@ fn load_library(
         .into(),
     );
     Ok(())
+}
+
+fn filter_library_group_options(ui: &MainWindow, query: &str) {
+    let query = query.trim().to_lowercase();
+    let shelves = ui.get_library_shelves();
+    let options = (0..shelves.row_count())
+        .filter_map(|index| shelves.row_data(index))
+        .filter(|shelf| query.is_empty() || shelf.name.to_lowercase().contains(&query))
+        .collect::<Vec<_>>();
+    ui.set_library_group_filter_options(ModelRc::new(VecModel::from(options)));
 }
 
 fn filter_library_documents(
@@ -1691,23 +2389,6 @@ fn collect_supported_documents(
     Ok(documents)
 }
 
-fn document_path_matches(document: &OpenDocument, path: &Path) -> bool {
-    document.path().is_some_and(|open_path| open_path == path)
-}
-
-fn upsert_open_document(open_documents: &RefCell<Vec<OpenDocument>>, document: OpenDocument) {
-    let mut documents = open_documents.borrow_mut();
-    if let Some(index) = document.path().and_then(|path| {
-        documents
-            .iter()
-            .position(|open| document_path_matches(open, path))
-    }) {
-        documents[index] = document;
-    } else {
-        documents.push(document);
-    }
-}
-
 fn refresh_open_tabs(ui: &MainWindow, documents: &[OpenDocument], active_path: Option<&Path>) {
     let tabs = documents
         .iter()
@@ -1740,6 +2421,24 @@ fn load_initial_index(core: &ReadloomCore, document: &OpenDocument) -> usize {
     }
 }
 
+fn load_session_index(
+    workspace: &DocumentWorkspace,
+    core: &ReadloomCore,
+    document: &OpenDocument,
+) -> usize {
+    let anchored = document
+        .path()
+        .and_then(|path| workspace.session(path))
+        .and_then(|session| {
+            let anchor = session.anchor()?;
+            document
+                .paragraphs()
+                .iter()
+                .position(|paragraph| paragraph.block_id == anchor.block_id)
+        });
+    anchored.unwrap_or_else(|| load_initial_index(core, document))
+}
+
 fn load_document_for_open(
     core: &ReadloomCore,
     path: &Path,
@@ -1767,6 +2466,190 @@ fn load_document_for_open(
     Ok((OpenDocument::Txt(Arc::new(document)), initial_index))
 }
 
+fn save_edit_ticket(
+    core: &ReadloomCore,
+    document: &OpenDocument,
+    ticket: &SaveTicket,
+    target: Option<&Path>,
+) -> Result<OpenDocument, String> {
+    match (document, ticket.draft()) {
+        (OpenDocument::Txt(document), DocumentDraft::Txt(draft)) => target
+            .map_or_else(
+                || core.save_txt_draft(document, draft),
+                |target| core.save_txt_draft_as(document, target, draft),
+            )
+            .map(|document| OpenDocument::Txt(Arc::new(document)))
+            .map_err(|error| error.to_string()),
+        (OpenDocument::Epub(_), DocumentDraft::Epub(draft)) => target
+            .map_or_else(
+                || core.save_epub_draft(draft),
+                |target| core.save_epub_draft_as(draft, target),
+            )
+            .map(|document| OpenDocument::Epub(Arc::new(document)))
+            .map_err(|error| error.to_string()),
+        _ => Err("编辑草稿与打开文档类型不匹配，已拒绝保存。".to_owned()),
+    }
+}
+
+fn restore_view_anchor_after_layout(
+    ui: &MainWindow,
+    session: &Rc<document_workspace::DocumentSession>,
+    controller: &Rc<RefCell<ViewportAnchorController>>,
+) {
+    let weak = ui.as_weak();
+    let session = session.clone();
+    let controller = controller.clone();
+    Timer::single_shot(Duration::from_millis(1), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let Some(anchor) = session.anchor() else {
+            return;
+        };
+        if let Some(viewport_y) = controller.borrow().viewport_y_for(&anchor) {
+            ui.set_reader_viewport_y(viewport_y);
+            ui.set_edit_anchor_block_id(anchor.block_id.as_str().into());
+            ui.set_edit_caret_utf16(as_i32(anchor.character_offset_utf16));
+            let caret_byte = session
+                .edit_session()
+                .and_then(|edit| {
+                    let edit = edit.borrow();
+                    edit.draft().block(&anchor.block_id).map(|block| {
+                        byte_offset_for_utf16(&block.text, anchor.character_offset_utf16)
+                    })
+                })
+                .unwrap_or_default();
+            ui.set_edit_caret_byte(as_i32(caret_byte));
+            ui.set_edit_anchor_pixel_offset(anchor.pixel_offset_from_viewport_top);
+            ui.set_edit_restore_generation(ui.get_edit_restore_generation().wrapping_add(1));
+        }
+    });
+}
+
+fn schedule_geometry_measurement(ui: &MainWindow) {
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::from_millis(1), move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_geometry_measure_generation(
+                ui.get_geometry_measure_generation().wrapping_add(1),
+            );
+        }
+    });
+}
+
+fn update_edit_history_state(ui: &MainWindow, session: &Rc<document_workspace::DocumentSession>) {
+    let state = session.edit_session();
+    ui.set_edit_can_undo(state.as_ref().is_some_and(|edit| edit.borrow().can_undo()));
+    ui.set_edit_can_redo(state.as_ref().is_some_and(|edit| edit.borrow().can_redo()));
+}
+
+fn apply_edit_history_step(
+    weak: &slint::Weak<MainWindow>,
+    workspace: &DocumentWorkspace,
+    viewport_anchors: &Rc<RefCell<ViewportAnchorController>>,
+    undo: bool,
+) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let Some(session) = workspace.active_session() else {
+        return;
+    };
+    let result = if undo { session.undo() } else { session.redo() };
+    match result {
+        Ok(true) => {
+            let index = ui.get_active_paragraph_index().max(0) as usize;
+            set_reader_models(
+                &ui,
+                session.presentation_document(),
+                index,
+                session.edit_session(),
+            );
+            ui.set_edit_dirty(true);
+            update_edit_history_state(&ui, &session);
+            ui.set_status_text(if undo { "已撤销。" } else { "已重做。" }.into());
+            restore_view_anchor_after_layout(&ui, &session, viewport_anchors);
+        }
+        Ok(false) => {}
+        Err(error) => ui.set_status_text(error.to_string().into()),
+    }
+}
+
+fn continue_dirty_action(
+    ui: &MainWindow,
+    core: &ReadloomCore,
+    workspace: &DocumentWorkspace,
+    viewport_anchors: &Rc<RefCell<ViewportAnchorController>>,
+    action: &str,
+    path: &Path,
+) {
+    match action {
+        "close" => {
+            let closed = workspace.close(path);
+            if closed.blocked_by_dirty_draft {
+                return;
+            }
+            if closed.active_changed {
+                if let Some(document) = closed.active {
+                    viewport_anchors.borrow_mut().clear();
+                    let index = load_session_index(workspace, core, &document);
+                    activate_open_document(ui, core, workspace, &document, index);
+                    if let Some(session) = workspace.active_session() {
+                        restore_view_anchor_after_layout(ui, &session, viewport_anchors);
+                    }
+                } else {
+                    show_empty_reader(ui);
+                }
+            }
+            let active_path = workspace.active_path();
+            refresh_open_tabs(ui, &workspace.snapshot(), active_path.as_deref());
+        }
+        "library" => {
+            ui.set_reader_open(false);
+            ui.set_settings_open(false);
+            ui.set_search_results(empty_model());
+            ui.set_search_results_truncated(false);
+            ui.set_status_text(
+                format!("已连接本地书库 · {} 本", ui.get_library_book_count()).into(),
+            );
+        }
+        "settings" => {
+            ui.set_settings_open(true);
+            ui.set_settings_section("reading.typography".into());
+            ui.set_status_text("设置会立即保存到本地数据库。".into());
+        }
+        "remove" => match core.remove_from_library(path) {
+            Ok(true) => {
+                let _ = load_library(ui, core, ui.get_settings_library_columns() as usize);
+                ui.set_status_text("已移除书库记录，原文件未删除。".into());
+            }
+            Ok(false) => ui.set_status_text("该书已不在书库中。".into()),
+            Err(error) => ui.set_status_text(error.to_string().into()),
+        },
+        "exit" => {
+            if let Some(document) = workspace.snapshot().into_iter().find(|document| {
+                document
+                    .path()
+                    .and_then(|path| workspace.session(path))
+                    .is_some_and(|session| session.is_dirty())
+            }) {
+                ui.set_dirty_confirm_action("exit".into());
+                ui.set_dirty_confirm_path(
+                    document
+                        .path()
+                        .map_or_else(String::new, |path| path.to_string_lossy().into_owned())
+                        .into(),
+                );
+                ui.set_dirty_confirm_title(document.title().into());
+                ui.set_dirty_confirm_open(true);
+            } else {
+                let _ = slint::quit_event_loop();
+            }
+        }
+        _ => {}
+    }
+}
+
 fn populate_open_document(ui: &MainWindow, document: &OpenDocument, initial_index: usize) {
     match document {
         OpenDocument::Txt(document) => populate_reader(ui, document, initial_index),
@@ -1777,27 +2660,46 @@ fn populate_open_document(ui: &MainWindow, document: &OpenDocument, initial_inde
 fn activate_open_document(
     ui: &MainWindow,
     core: &ReadloomCore,
-    current_document: &RefCell<Option<OpenDocument>>,
-    open_documents: &RefCell<Vec<OpenDocument>>,
+    workspace: &DocumentWorkspace,
     document: &OpenDocument,
     initial_index: usize,
 ) {
     populate_open_document(ui, document, initial_index);
-    *current_document.borrow_mut() = Some(document.clone());
-    refresh_open_tabs(ui, &open_documents.borrow(), document.path());
+    workspace.activate(document);
+    let has_anchor = if let Some(session) = workspace.active_session() {
+        ui.set_edit_mode(session.editing());
+        ui.set_edit_dirty(session.is_dirty());
+        update_edit_history_state(ui, &session);
+        if session.editing() {
+            set_reader_models(
+                ui,
+                session.presentation_document(),
+                initial_index,
+                session.edit_session(),
+            );
+        }
+        session.anchor().is_some()
+    } else {
+        false
+    };
+    refresh_open_tabs(ui, &workspace.snapshot(), document.path());
     load_bookmarks(ui, core, document);
-    navigate_after_layout(ui, initial_index);
+    if !has_anchor {
+        navigate_after_layout(ui, initial_index);
+    }
 }
 
 fn show_empty_reader(ui: &MainWindow) {
     ui.set_reader_open(true);
     ui.set_settings_open(false);
     ui.set_edit_mode(false);
+    ui.set_edit_can_undo(false);
+    ui.set_edit_can_redo(false);
     ui.set_document_title("".into());
     ui.set_document_author("".into());
     ui.set_document_kind("".into());
     ui.set_document_path("".into());
-    ui.set_edit_content("".into());
+    ui.set_edit_dirty(false);
     ui.set_reader_side_panel("".into());
     ui.set_chapters(empty_model());
     ui.set_document_paragraph_count(0);
@@ -1805,6 +2707,7 @@ fn show_empty_reader(ui: &MainWindow) {
     ui.set_paragraphs(empty_model());
     ui.set_paragraph_rows(empty_model());
     ui.set_search_results(empty_model());
+    ui.set_search_results_truncated(false);
     ui.set_bookmarks(empty_model());
     ui.set_status_text("当前没有打开的书籍。".into());
 }
@@ -1858,26 +2761,26 @@ fn load_bookmarks(ui: &MainWindow, core: &ReadloomCore, document: &OpenDocument)
     }
 }
 
-fn search_items(hits: Vec<SearchHit>, epub: bool) -> Vec<SearchItem> {
-    hits.into_iter()
+fn search_items(hits: Vec<SearchHit>) -> SearchPresentation {
+    let truncated = hits.len() > MAXIMUM_SEARCH_RESULTS;
+    let items = hits
+        .into_iter()
+        .take(MAXIMUM_SEARCH_RESULTS)
         .enumerate()
         .map(|(index, hit)| SearchItem {
-            label: if epub {
-                format!(
-                    "结果 {} · 第 {} 章 · 段落 {}",
-                    index + 1,
-                    hit.chapter_index + 1,
-                    hit.paragraph_index + 1
-                )
-                .into()
-            } else {
-                format!("结果 {} · 段落 {}", index + 1, hit.paragraph_index + 1).into()
-            },
+            label: format!(
+                "序号 {:03} · 第 {} 章 · 段落 {}",
+                index + 1,
+                hit.chapter_index + 1,
+                hit.paragraph_index + 1
+            )
+            .into(),
             preview: hit.preview.into(),
             chapter_index: as_i32(hit.chapter_index),
             paragraph_index: as_i32(hit.paragraph_index),
         })
-        .collect()
+        .collect();
+    SearchPresentation { items, truncated }
 }
 
 fn populate_reader(ui: &MainWindow, document: &Arc<ReaderDocument>, initial_index: usize) {
@@ -1895,7 +2798,6 @@ fn populate_reader(ui: &MainWindow, document: &Arc<ReaderDocument>, initial_inde
     ui.set_document_title(document.title().into());
     ui.set_document_author("".into());
     ui.set_document_kind("TXT".into());
-    ui.set_edit_content("".into());
     ui.set_edit_mode(false);
     ui.set_reader_side_panel("".into());
     ui.set_document_encoding(document.encoding().label(document.has_bom()).into());
@@ -1907,8 +2809,9 @@ fn populate_reader(ui: &MainWindow, document: &Arc<ReaderDocument>, initial_inde
             .into(),
     );
     ui.set_chapters(ModelRc::new(VecModel::from(chapters)));
-    set_reader_models(ui, OpenDocument::Txt(document.clone()), initial_index);
+    set_reader_models(ui, OpenDocument::Txt(document.clone()), initial_index, None);
     ui.set_search_results(empty_model());
+    ui.set_search_results_truncated(false);
     ui.set_active_paragraph_index(as_i32(initial_index));
     let active_chapter = document
         .paragraphs()
@@ -1951,15 +2854,20 @@ fn populate_epub_reader(ui: &MainWindow, document: &Arc<EpubDocument>, initial_i
     ui.set_document_title(document.title().into());
     ui.set_document_author(document.author().unwrap_or("").into());
     ui.set_document_kind("EPUB".into());
-    ui.set_edit_content("".into());
     ui.set_edit_mode(false);
     ui.set_reader_side_panel("".into());
     ui.set_document_encoding("EPUB".into());
     ui.set_document_line_ending("安全布局".into());
     ui.set_document_path(document.path().to_string_lossy().into_owned().into());
     ui.set_chapters(ModelRc::new(VecModel::from(chapters)));
-    set_reader_models(ui, OpenDocument::Epub(document.clone()), initial_index);
+    set_reader_models(
+        ui,
+        OpenDocument::Epub(document.clone()),
+        initial_index,
+        None,
+    );
     ui.set_search_results(empty_model());
+    ui.set_search_results_truncated(false);
     ui.set_active_paragraph_index(as_i32(initial_index));
     let active_chapter = document.active_chapter_index();
     ui.set_active_chapter_index(as_i32(active_chapter));
@@ -1996,7 +2904,12 @@ fn paragraph_kind_name(kind: ParagraphKind) -> SharedString {
     .into()
 }
 
-fn set_reader_models(ui: &MainWindow, document: OpenDocument, target: usize) {
+fn set_reader_models(
+    ui: &MainWindow,
+    document: OpenDocument,
+    target: usize,
+    edit: Option<Rc<RefCell<EditSession>>>,
+) {
     let paragraph_count = match &document {
         OpenDocument::Txt(document) => document.paragraphs().len(),
         OpenDocument::Epub(document) => document.paragraphs().len(),
@@ -2005,18 +2918,20 @@ fn set_reader_models(ui: &MainWindow, document: OpenDocument, target: usize) {
     let end = start
         .saturating_add(READER_WINDOW_SIZE)
         .min(paragraph_count);
-    let paragraph_model = ReaderParagraphModel::new(document, start..end);
+    let paragraph_model = ReaderParagraphModel::new_with_edit(document, start..end, edit);
     let rows = paragraph_model.paragraph_rows();
     let paragraphs = ModelRc::new(paragraph_model);
     let paragraph_rows = ModelRc::new(ReaderParagraphRowModel {
         paragraphs: paragraphs.clone(),
         rows,
         window_start: start,
+        notify: ModelNotify::default(),
     });
     ui.set_document_paragraph_count(as_i32(paragraph_count));
     ui.set_reader_window_start(as_i32(start));
     ui.set_paragraphs(paragraphs);
     ui.set_paragraph_rows(paragraph_rows);
+    schedule_geometry_measurement(ui);
 }
 
 fn update_reader_target_row(ui: &MainWindow, paragraph_index: usize) {
@@ -2031,11 +2946,26 @@ fn update_reader_target_row(ui: &MainWindow, paragraph_index: usize) {
     ui.set_reader_target_row(as_i32(row));
 }
 
-fn decode_epub_image(resource: &EpubImageResource) -> Image {
-    let Ok(decoded) = image::load_from_memory(&resource.bytes) else {
-        return Image::default();
-    };
-    dynamic_image_to_slint(decoded, EPUB_IMAGE_MAX_WIDTH, EPUB_IMAGE_MAX_HEIGHT)
+fn refresh_ready_reader_images(ui: &MainWindow) {
+    let ready = READER_IMAGE_PIPELINE.with(|pipeline| pipeline.drain_ready());
+    if ready.is_empty() {
+        return;
+    }
+    let paragraphs = ui.get_paragraphs();
+    let changed = paragraphs
+        .as_any()
+        .downcast_ref::<ReaderParagraphModel>()
+        .is_some_and(|model| model.notify_ready_images(&ready));
+    if changed {
+        let paragraph_rows = ui.get_paragraph_rows();
+        if let Some(model) = paragraph_rows
+            .as_any()
+            .downcast_ref::<ReaderParagraphRowModel>()
+        {
+            model.notify.reset();
+        }
+        ui.window().request_redraw();
+    }
 }
 
 fn load_library_cover_image(path: &Path) -> Option<Image> {
@@ -2154,6 +3084,9 @@ fn chapter_target(
 }
 
 fn apply_settings(ui: &MainWindow, settings: &AppSettings) {
+    let resolved_font = resolve_reading_font(&settings.reading.font_family);
+    let effective_dark = settings.theme == AppTheme::Dark
+        || (settings.theme == AppTheme::System && windows_prefers_dark());
     ui.set_settings_theme(
         match settings.theme {
             AppTheme::Light => "light",
@@ -2162,16 +3095,8 @@ fn apply_settings(ui: &MainWindow, settings: &AppSettings) {
         }
         .into(),
     );
-    ui.set_settings_effective_theme(
-        if settings.theme == AppTheme::Dark
-            || (settings.theme == AppTheme::System && windows_prefers_dark())
-        {
-            "dark"
-        } else {
-            "light"
-        }
-        .into(),
-    );
+    ui.set_settings_effective_theme(if effective_dark { "dark" } else { "light" }.into());
+    ui.global::<DesignTokens>().set_dark(effective_dark);
     ui.set_settings_library_columns(settings.library_columns);
     ui.set_settings_background_opacity(settings.background_opacity);
     ui.set_settings_minimize_to_tray(settings.minimize_to_tray);
@@ -2183,11 +3108,13 @@ fn apply_settings(ui: &MainWindow, settings: &AppSettings) {
         .into(),
     );
     ui.set_settings_font_id(settings.reading.font_family.clone().into());
-    ui.set_settings_font_family(settings.reading.resolved_font_family().into());
+    ui.set_settings_font_family(resolved_font.family.into());
+    ui.set_settings_font_fallback(resolved_font.fallback);
     ui.set_settings_font_size(settings.reading.font_size);
     ui.set_settings_font_weight(settings.reading.font_weight);
     ui.set_settings_letter_spacing(settings.reading.letter_spacing);
     ui.set_settings_first_line_indent(settings.reading.first_line_indent);
+    ui.set_settings_indent_prefix(indentation_prefix(settings.reading.first_line_indent).into());
     ui.set_settings_line_height(settings.reading.line_height);
     ui.set_settings_paragraph_spacing(settings.reading.paragraph_spacing);
     ui.set_settings_content_width(settings.reading.content_width);
@@ -2244,6 +3171,7 @@ fn apply_settings(ui: &MainWindow, settings: &AppSettings) {
     ui.set_shortcut_bookmark(settings.shortcuts.bookmark.clone().into());
     ui.set_shortcut_show_library(settings.shortcuts.show_library.clone().into());
     ui.set_shortcut_show_settings(settings.shortcuts.show_settings.clone().into());
+    schedule_geometry_measurement(ui);
     ui.window().request_redraw();
 }
 
@@ -2275,31 +3203,19 @@ fn windows_prefers_dark() -> bool {
     false
 }
 
-fn apply_background(ui: &MainWindow, core: &ReadloomCore) {
-    let path = core.background_image_path().ok().flatten();
-    ui.set_settings_has_background(path.is_some());
-    if let Some(path) = path
-        && let Ok(image) = slint::Image::load_from_path(&path)
-    {
-        ui.set_settings_background_image(image);
-    } else {
-        ui.set_settings_background_image(slint::Image::default());
-    }
-}
-
 fn install_settings_handlers(
     ui: &MainWindow,
     core: &Arc<ReadloomCore>,
     settings: &Rc<RefCell<AppSettings>>,
-    current_document: &Rc<RefCell<Option<OpenDocument>>>,
-    open_documents: &Rc<RefCell<Vec<OpenDocument>>>,
+    workspace: &Rc<DocumentWorkspace>,
+    background_image_sender: &mpsc::Sender<BackgroundImageRequest>,
+    active_background_image_request: &Rc<Cell<u64>>,
 ) {
     {
         let weak = ui.as_weak();
         let core = core.clone();
         let settings = settings.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
         ui.on_update_setting(move |key, value| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2374,16 +3290,23 @@ fn install_settings_handlers(
                     _ => return,
                 }
             }
-            let structural = matches!(key, "txtIndent" | "txtBlankLines" | "mergeWrappedLines");
+            let structural = matches!(
+                key,
+                "txtIndent" | "txtBlankLines" | "mergeWrappedLines" | "reading.reset"
+            );
+            let geometry = matches!(
+                key,
+                "font" | "alignment" | "readingColumns" | "reading.reset"
+            );
             if persist_settings(&ui, &core, &settings, "设置已保存并实时生效。") {
                 if key == "libraryColumns" {
                     let _ = load_library(&ui, &core, settings.borrow().library_columns as usize);
                 }
-                if key == "readingColumns" {
-                    navigate_after_layout(&ui, ui.get_active_paragraph_index().max(0) as usize);
-                }
                 if structural {
-                    refresh_open_txt(&ui, &core, &current_document, &open_documents);
+                    refresh_open_txt(&ui, &core, &workspace);
+                }
+                if geometry && !structural {
+                    navigate_after_layout(&ui, ui.get_active_paragraph_index().max(0) as usize);
                 }
             }
         });
@@ -2400,7 +3323,7 @@ fn install_settings_handlers(
             {
                 let mut settings = settings.borrow_mut();
                 match key.as_str() {
-                    "backgroundOpacity" => settings.background_opacity += delta,
+                    "backgroundOpacityAbsolute" => settings.background_opacity = delta,
                     "fontSize" => settings.reading.font_size += delta.round() as i32,
                     "fontWeight" => settings.reading.font_weight += delta.round() as i32,
                     "letterSpacing" => settings.reading.letter_spacing += delta,
@@ -2414,8 +3337,10 @@ fn install_settings_handlers(
                     "verticalMargin" => settings.reading.vertical_margin += delta.round() as i32,
                     _ => return,
                 }
+                clamp_reading_preview(&mut settings);
             }
             apply_settings(&ui, &settings.borrow());
+            navigate_after_layout(&ui, ui.get_active_paragraph_index().max(0) as usize);
             ui.set_status_text("排版预览已更新，稍后自动保存。".into());
             let weak = weak.clone();
             let core = core.clone();
@@ -2427,7 +3352,11 @@ fn install_settings_handlers(
                     let Some(ui) = weak.upgrade() else {
                         return;
                     };
-                    match core.save_settings(&settings.borrow()) {
+                    let save_result = {
+                        let current = settings.borrow();
+                        core.save_settings(&current)
+                    };
+                    match save_result {
                         Ok(saved) => {
                             *settings.borrow_mut() = saved;
                             apply_settings(&ui, &settings.borrow());
@@ -2441,7 +3370,8 @@ fn install_settings_handlers(
     }
     {
         let weak = ui.as_weak();
-        let core = core.clone();
+        let background_image_sender = background_image_sender.clone();
+        let active_background_image_request = active_background_image_request.clone();
         ui.on_choose_background(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2452,28 +3382,50 @@ fn install_settings_handlers(
             else {
                 return;
             };
-            match core.set_background_image(&path) {
-                Ok(_) => {
-                    apply_background(&ui, &core);
-                    ui.set_status_text("背景图片已复制到应用数据目录。".into());
-                }
-                Err(error) => ui.set_status_text(error.to_string().into()),
+            let request_id = active_background_image_request.get().wrapping_add(1).max(1);
+            active_background_image_request.set(request_id);
+            ui.set_status_text("正在后台检查并载入背景图片…".into());
+            if background_image_sender
+                .send(BackgroundImageRequest {
+                    request_id,
+                    operation: BackgroundImageOperation::Select,
+                    path: Some(path),
+                })
+                .is_err()
+            {
+                ui.set_status_text("背景图片处理线程不可用。".into());
             }
         });
     }
     {
         let weak = ui.as_weak();
-        let core = core.clone();
+        let background_image_sender = background_image_sender.clone();
+        let active_background_image_request = active_background_image_request.clone();
         ui.on_clear_background(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            match core.clear_background_image() {
-                Ok(()) => {
-                    apply_background(&ui, &core);
-                    ui.set_status_text("背景图片已清除。".into());
-                }
-                Err(error) => ui.set_status_text(error.to_string().into()),
+            let request_id = active_background_image_request.get().wrapping_add(1).max(1);
+            active_background_image_request.set(request_id);
+            ui.set_status_text("正在清除背景图片…".into());
+            if background_image_sender
+                .send(BackgroundImageRequest {
+                    request_id,
+                    operation: BackgroundImageOperation::Clear,
+                    path: None,
+                })
+                .is_err()
+            {
+                ui.set_status_text("背景图片处理线程不可用。".into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_begin_shortcut_capture(move |action| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_shortcut_capture_action(action);
+                ui.set_status_text("请直接按下组合键；Esc 取消，Backspace 或 Delete 清除。".into());
             }
         });
     }
@@ -2492,6 +3444,7 @@ fn install_settings_handlers(
             {
                 return;
             }
+            ui.set_shortcut_capture_action("".into());
             persist_settings(&ui, &core, &settings, "快捷键已保存。");
         });
     }
@@ -2503,6 +3456,7 @@ fn install_settings_handlers(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            ui.set_shortcut_capture_action("".into());
             settings.borrow_mut().shortcuts = Default::default();
             persist_settings(&ui, &core, &settings, "全部快捷键已清除。");
         });
@@ -2511,8 +3465,7 @@ fn install_settings_handlers(
         let weak = ui.as_weak();
         let core = core.clone();
         let settings = settings.clone();
-        let current_document = current_document.clone();
-        let open_documents = open_documents.clone();
+        let workspace = workspace.clone();
         ui.on_set_chapter_pattern(move |pattern| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2520,7 +3473,7 @@ fn install_settings_handlers(
             settings.borrow_mut().books.txt_chapter_pattern = pattern.to_string();
             if persist_settings(&ui, &core, &settings, "TXT 章节识别规则已保存。") {
                 ui.set_settings_pattern_error("".into());
-                refresh_open_txt(&ui, &core, &current_document, &open_documents);
+                refresh_open_txt(&ui, &core, &workspace);
             } else {
                 ui.set_settings_pattern_error("正则表达式无效，仍使用上一次有效规则。".into());
             }
@@ -2707,19 +3660,12 @@ fn unix_timestamp_seconds() -> u64 {
         .as_secs()
 }
 
-fn refresh_open_txt(
-    ui: &MainWindow,
-    core: &ReadloomCore,
-    current_document: &RefCell<Option<OpenDocument>>,
-    open_documents: &RefCell<Vec<OpenDocument>>,
-) {
-    let path = current_document
-        .borrow()
-        .as_ref()
-        .and_then(|document| match document {
-            OpenDocument::Txt(document) => document.path().map(Path::to_path_buf),
-            OpenDocument::Epub(_) => None,
-        });
+fn refresh_open_txt(ui: &MainWindow, core: &ReadloomCore, workspace: &DocumentWorkspace) {
+    let active = workspace.active();
+    let path = active.as_ref().and_then(|document| match document {
+        OpenDocument::Txt(document) => document.path().map(Path::to_path_buf),
+        OpenDocument::Epub(_) => None,
+    });
     let Some(path) = path else {
         return;
     };
@@ -2728,8 +3674,8 @@ fn refresh_open_txt(
         Ok(document) => {
             let index = index.min(document.paragraphs().len().saturating_sub(1));
             let opened = OpenDocument::Txt(Arc::new(document));
-            upsert_open_document(open_documents, opened.clone());
-            activate_open_document(ui, core, current_document, open_documents, &opened, index);
+            workspace.upsert(opened.clone());
+            activate_open_document(ui, core, workspace, &opened, index);
         }
         Err(error) => ui.set_status_text(error.to_string().into()),
     }
@@ -2741,12 +3687,14 @@ fn persist_settings(
     settings: &RefCell<AppSettings>,
     message: &str,
 ) -> bool {
-    let result = core.save_settings(&settings.borrow());
+    let result = {
+        let current = settings.borrow();
+        core.save_settings(&current)
+    };
     match result {
         Ok(saved) => {
             *settings.borrow_mut() = saved;
             apply_settings(ui, &settings.borrow());
-            apply_background(ui, core);
             ui.set_status_text(message.into());
             true
         }
@@ -2788,6 +3736,10 @@ fn state_database_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::File, io::Write, time::Instant};
+
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
     use super::*;
 
     #[test]
@@ -2821,6 +3773,144 @@ mod tests {
     }
 
     #[test]
+    fn inline_editing_keeps_the_reader_canvas_background_and_scroll_views_mounted() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let canvas = source
+            .split("background: DesignTokens.reader-background;")
+            .nth(1)
+            .expect("reader canvas")
+            .split("if root.reader-side-panel != \"\"")
+            .next()
+            .expect("reader canvas body");
+
+        assert!(canvas.contains("if root.settings-has-background : Image"));
+        assert!(
+            canvas.contains("if root.settings-reading-columns == 1 : reader-list := ScrollView")
+        );
+        assert!(
+            canvas.contains(
+                "if root.settings-reading-columns == 2 : double-reader-list := ScrollView"
+            )
+        );
+        assert!(
+            canvas.contains(
+                "if root.edit-mode && paragraph.editable : paragraph-editor := TextInput"
+            )
+        );
+        assert!(!canvas.contains("if root.edit-mode : Rectangle"));
+        assert!(!canvas.contains("background: DesignTokens.surface-subtle"));
+        assert!(!source.contains("edit-content"));
+    }
+
+    #[test]
+    fn editing_uses_measured_block_geometry_and_the_key_path_does_not_reset_models() {
+        let ui_source = include_str!("../../../ui/readloom.slint");
+        let rust_source = include_str!("main.rs");
+        assert!(!ui_source.contains("reader-viewport-y / 58px"));
+        assert!(!ui_source.contains("reader-target-row * 58px"));
+        assert!(ui_source.contains("report-block-geometry"));
+        assert!(ui_source.contains("navigate-exact"));
+        let key_path = rust_source
+            .split("ui.on_replace_block_text")
+            .nth(1)
+            .expect("block edit callback")
+            .split("ui.on_save_document")
+            .next()
+            .expect("block edit callback body");
+        assert!(!key_path.contains("set_reader_models"));
+        assert!(!key_path.contains("std::fs"));
+        assert!(!key_path.contains("save_epub"));
+    }
+
+    #[test]
+    fn reader_geometry_reporting_never_reads_a_property_from_its_own_change_handler() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(!source.contains("changed y => { root.report-block-geometry"));
+        assert!(!source.contains("changed height => { root.report-block-geometry"));
+        assert!(!source.contains(
+            "changed y => {\n                                        root.report-block-geometry"
+        ));
+        assert!(!source.contains("changed height => {\n                                        root.report-block-geometry"));
+        assert!(source.contains("changed measure-generation =>"));
+    }
+
+    #[test]
+    fn txt_scroll_anchor_lookup_is_bounded_by_the_presentation_window() {
+        let content = (0..50_000)
+            .map(|index| format!("这是快速滚轮回归测试的第 {index} 段。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = OpenDocument::Txt(Arc::new(ReaderDocument::from_text("滚轮测试", content)));
+        let paragraph_count = document.paragraphs().len();
+        let window_start = paragraph_count.saturating_sub(READER_WINDOW_SIZE);
+        let model = ReaderParagraphModel::new_with_edit(
+            document.clone(),
+            window_start..paragraph_count,
+            None,
+        );
+        let target = model
+            .window_paragraphs()
+            .last()
+            .expect("last visible paragraph")
+            .block_id
+            .clone();
+
+        let resolved =
+            resolve_viewport_paragraph(Some(&model), &target).expect("resolve visible paragraph");
+
+        assert_eq!(resolved.index, paragraph_count - 1);
+        assert!(
+            resolved.inspected_paragraphs <= READER_WINDOW_SIZE,
+            "one wheel callback inspected {} paragraphs although only {} are presented",
+            resolved.inspected_paragraphs,
+            READER_WINDOW_SIZE
+        );
+    }
+
+    #[test]
+    fn txt_scroll_callbacks_never_snapshot_the_full_document() {
+        let source = include_str!("main.rs");
+        let viewport_callback = source
+            .split("ui.on_reader_viewport_changed")
+            .nth(1)
+            .expect("viewport callback")
+            .split("ui.on_open_epub_location")
+            .next()
+            .expect("viewport callback body");
+        let position_callback = source
+            .split("ui.on_reading_position_changed")
+            .nth(1)
+            .expect("position callback")
+            .split("ui.on_previous_chapter")
+            .next()
+            .expect("position callback body");
+
+        assert!(!viewport_callback.contains("document.paragraphs()"));
+        assert!(!position_callback.contains("document.paragraphs()"));
+        assert!(viewport_callback.contains("resolve_viewport_paragraph"));
+        assert!(position_callback.contains("presented_paragraph"));
+    }
+
+    #[test]
+    fn dirty_navigation_and_conflicts_expose_explicit_user_decisions() {
+        let source = include_str!("../../../ui/readloom.slint");
+        for label in [
+            "保存并继续",
+            "放弃修改",
+            "取消",
+            "重新加载外部版本",
+            "另存为",
+            "暂不支持跨段合并",
+        ] {
+            assert!(source.contains(label), "missing decision label {label}");
+        }
+        assert!(!source.contains("编辑书籍信息"));
+        assert!(!source.contains("编辑当前章节"));
+        assert!(!source.contains("原 EPUB 只读"));
+    }
+
+    #[test]
     fn epub_images_are_downscaled_before_becoming_slint_images() {
         let source = image::RgbaImage::from_pixel(1_600, 800, image::Rgba([24, 48, 72, 255]));
         let mut encoded = std::io::Cursor::new(Vec::new());
@@ -2830,11 +3920,13 @@ mod tests {
         let encoded = encoded.into_inner();
         let resource = EpubImageResource {
             media_type: "image/png".to_owned(),
-            bytes: encoded.clone(),
+            bytes: encoded.clone().into(),
             alt_text: "大图".to_owned(),
         };
 
-        let decoded = decode_epub_image(&resource);
+        let pixels = reader_images::decode_epub_image_pixels(&resource.bytes)
+            .expect("decode EPUB image pixels");
+        let decoded = Image::from_rgba8(pixels);
 
         assert_eq!(decoded.size().width, 1_200);
         assert_eq!(decoded.size().height, 600);
@@ -2848,19 +3940,99 @@ mod tests {
     }
 
     #[test]
-    fn reader_image_cache_is_a_bounded_lru() {
-        let image = || Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(1, 1));
-        let mut cache = DecodedImageCache::new(8);
-        cache.insert(1, image());
-        cache.insert(2, image());
-        assert!(cache.get(1).is_some());
+    fn epub_image_rows_do_not_decode_on_the_ui_thread() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = image::RgbaImage::from_pixel(1_600, 800, image::Rgba([24, 48, 72, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("encode test png");
+        let epub_path = directory.path().join("large-image.epub");
+        write_image_epub(&epub_path, &encoded.into_inner());
+        let core = ReadloomCore::open(&directory.path().join("state.sqlite3")).expect("open core");
+        let document = Arc::new(core.open_epub(&epub_path).expect("open image epub"));
+        let image_row = document
+            .paragraphs()
+            .iter()
+            .position(|paragraph| paragraph.kind == ParagraphKind::Image)
+            .expect("image paragraph");
+        let model = ReaderParagraphModel::new(
+            OpenDocument::Epub(document),
+            image_row..image_row.saturating_add(1),
+        );
 
-        cache.insert(3, image());
+        let started = Instant::now();
+        let row = model.row_data(0).expect("image row");
+        let elapsed = started.elapsed();
 
-        assert!(cache.entries.contains_key(&1));
-        assert!(!cache.entries.contains_key(&2));
-        assert!(cache.entries.contains_key(&3));
-        assert!(cache.decoded_bytes <= cache.maximum_bytes);
+        eprintln!("first EPUB image row_data call: {elapsed:?}");
+        assert!(
+            !row.has_image,
+            "the first model read must return a placeholder while decoding happens off-thread"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let ready = READER_IMAGE_PIPELINE.with(|pipeline| pipeline.drain_ready());
+            if model.notify_ready_images(&ready) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the background decoder must finish the requested image"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            model.row_data(0).expect("decoded image row").has_image,
+            "the model must expose the cached image after the background result is drained"
+        );
+    }
+
+    fn write_image_epub(path: &Path, image_bytes: &[u8]) {
+        let file = File::create(path).expect("create EPUB");
+        let mut writer = ZipWriter::new(file);
+        let entries = [
+            (
+                "mimetype",
+                "application/epub+zip",
+                CompressionMethod::Stored,
+            ),
+            (
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "EPUB/package.opf",
+                r#"<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:readloom:image-test</dc:identifier><dc:title>图片性能测试</dc:title><dc:language>zh-CN</dc:language><meta property="dcterms:modified">2026-08-12T00:00:00Z</meta></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="illustration" href="illustration.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "EPUB/chapter.xhtml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第一章</h1><p>图片前正文。</p><img src="illustration.png" alt="大图"/><p>图片后正文。</p></body></html>"#,
+                CompressionMethod::Deflated,
+            ),
+        ];
+        for (name, content, compression) in entries {
+            writer
+                .start_file(
+                    name,
+                    SimpleFileOptions::default().compression_method(compression),
+                )
+                .expect("start EPUB entry");
+            writer
+                .write_all(content.as_bytes())
+                .expect("write EPUB entry");
+        }
+        writer
+            .start_file(
+                "EPUB/illustration.png",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .expect("start image entry");
+        writer.write_all(image_bytes).expect("write image entry");
+        writer.finish().expect("finish EPUB");
     }
 
     #[test]
@@ -2885,12 +4057,256 @@ mod tests {
 
         assert_eq!(source.matches("root.preview-pane-resize(").count(), 4);
         assert_eq!(source.matches("root.commit-pane-resize(").count(), 4);
-        assert_eq!(source.matches("PointerEventKind.up").count(), 4);
+        assert_eq!(
+            source
+                .matches("event.kind == PointerEventKind.up && root.pane-resize-preview-kind")
+                .count(),
+            4
+        );
         assert!(!source.contains("root.queue-pane-resize("));
         assert!(!source.contains("root.workspace-pane-width = Math.max"));
         assert!(!source.contains("root.reader-tools-pane-width = Math.max"));
         assert!(!source.contains("root.epub-search-panel-width = Math.max"));
         assert!(!source.contains("root.settings-navigation-width = Math.max"));
+    }
+
+    #[test]
+    fn bookmark_delete_button_is_above_the_row_navigation_hit_area() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let bookmark_row = source
+            .split("for mark in root.bookmarks")
+            .nth(1)
+            .expect("bookmark row delegate");
+        let navigation_layer = bookmark_row
+            .find("bookmark-touch := TouchArea")
+            .expect("bookmark navigation hit area");
+        let delete_button = bookmark_row
+            .find("root.delete-bookmark(mark.id)")
+            .expect("bookmark delete button");
+
+        assert!(
+            navigation_layer < delete_button,
+            "the row navigation hit area must be behind the delete button"
+        );
+    }
+
+    #[test]
+    fn reader_side_lists_fill_the_remaining_panel_height() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let search_list = source
+            .split("accessible-id: \"reader-search-results\";")
+            .nth(1)
+            .expect("search result list");
+        let bookmark_list = source
+            .split("accessible-id: \"reader-bookmarks\";")
+            .nth(1)
+            .expect("bookmark list");
+
+        assert!(search_list.starts_with("\n                                    min-height: 0px;\n                                    vertical-stretch: 1;"));
+        assert!(bookmark_list.starts_with("\n                                    min-height: 0px;\n                                    vertical-stretch: 1;"));
+    }
+
+    #[test]
+    fn active_reader_highlight_keeps_the_background_image_visible() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.matches("#315fc418").count() >= 2);
+        assert!(!source.contains("root.settings-effective-theme == \"dark\" ? #283149 : #f8faff"));
+    }
+
+    #[test]
+    fn library_books_move_to_an_explicitly_selected_group() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("in-out property <bool> group-picker-open: false;"));
+        assert!(source.contains("text: \"选择目标分组\";"));
+        assert!(
+            source
+                .contains("root.move-library-book(root.group-picker-path, shelf.id, shelf.name);")
+        );
+        assert!(!source.contains("let next-index = root.book.group-index"));
+        assert!(!source.contains("group-index: int"));
+    }
+
+    #[test]
+    fn workspace_group_ordering_uses_dragging_without_arrow_controls() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(!source.contains("书库分组 · 拖动排序"));
+        assert!(source.contains("\"拖动调整分组顺序\""));
+        assert!(source.contains("root.reorder(root.drag-target-index - 2);"));
+        assert!(source.contains("root.reorder-group(shelf.id, target-index);"));
+        assert!(source.contains("drag-handle := TouchArea"));
+        assert!(source.contains("row-touch := TouchArea"));
+        assert!(!source.contains("放到此分组之后"));
+        assert!(!source.contains("放到此分组之前"));
+        assert!(source.contains("accessible-label: \"删除分组\" + root.shelf.name;"));
+        assert!(!source.contains("component GroupHeaderOrderButton"));
+        assert!(!source.contains("label: \"上移当前分组\";"));
+        assert!(!source.contains("label: \"下移当前分组\";"));
+        assert!(!source.contains("GroupOrderButton"));
+        assert!(!source.contains("icon: \"↑\";"));
+        assert!(!source.contains("icon: \"↓\";"));
+    }
+
+    #[test]
+    fn library_group_filter_and_sort_use_explicit_popup_choices() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("accessible-id: \"library-group-filter-search\";"));
+        assert!(source.contains("placeholder-text: \"搜索分组\";"));
+        assert!(source.contains("group-filter-popup.show();"));
+        assert!(source.contains("sort-popup.show();"));
+        assert!(source.contains("text: \"最近打开\";"));
+        assert!(source.contains("text: \"名称排序\";"));
+        assert!(!source.contains("Math.mod(root.library-group-filter-index + 1"));
+        assert!(!source.contains(
+            "root.library-sort-mode = root.library-sort-mode == \"recent\" ? \"title\" : \"recent\";"
+        ));
+    }
+
+    #[test]
+    fn settings_sections_are_runtime_wired() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let rust_source = include_str!("main.rs");
+
+        assert!(source.contains("in-out property <string> shortcut-capture-action: \"\";"));
+        assert!(source.contains("callback begin-shortcut-capture(string);"));
+        assert!(source.contains("component ShortcutSettingRow"));
+        assert!(source.contains("padding-top: root.settings-vertical-margin * 1px;"));
+        assert!(source.contains("padding-bottom: root.settings-vertical-margin * 1px;"));
+        assert!(source.contains("root.settings-indent-prefix + paragraph.text"));
+        assert!(source.contains("当前实际字体："));
+        assert!(rust_source.contains("ui.invoke_close_open_document(ui.get_document_path())"));
+        assert!(rust_source.contains("ui.invoke_add_bookmark()"));
+        assert!(rust_source.contains("&& !event.repeat"));
+    }
+
+    #[test]
+    fn semantic_design_system_drives_settings_and_reader_surfaces() {
+        let ui_source = include_str!("../../../ui/readloom.slint");
+        let rust_source = include_str!("main.rs");
+
+        assert!(ui_source.contains("export global DesignTokens"));
+        assert!(ui_source.contains("out property <length> type-page-title: 24px;"));
+        assert!(ui_source.contains("out property <length> space-10: 40px;"));
+        assert!(ui_source.contains("out property <brush> reader-background:"));
+        assert!(ui_source.contains("component SettingsSectionHeader"));
+        assert!(ui_source.contains("component SegmentedSettingRow"));
+        assert!(ui_source.contains("component ToolbarButton"));
+        assert!(ui_source.contains("component IconButton"));
+        assert!(rust_source.contains("ui.global::<DesignTokens>().set_dark(effective_dark);"));
+    }
+
+    #[test]
+    fn reading_settings_remain_responsive_and_preview_all_typography_changes() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("row: root.width >= 1500px ? 0 : 1;"));
+        assert!(source.contains("min-height: root.width >= 1500px ? 0px : 240px;"));
+        assert!(source.contains("text: \"阅读预览\";"));
+        assert!(source.contains("font-family: root.settings-font-family;"));
+        assert!(source.contains("root.settings-paragraph-spacing * root.settings-font-size"));
+        assert!(source.contains("root.settings-indent-prefix + \"清晨的雾气还未散尽"));
+        assert!(!source.contains("? \"[亮色]\" : \"亮色\""));
+        assert!(!source.contains("? \"[全部]\" : \"全部\""));
+    }
+
+    #[test]
+    fn reading_indentation_preserves_quarter_em_steps() {
+        assert_eq!(indentation_prefix(0.0), "");
+        assert_eq!(indentation_prefix(0.25), " ");
+        assert_eq!(indentation_prefix(0.75), "   ");
+        assert_eq!(indentation_prefix(1.0), "　");
+        assert_eq!(indentation_prefix(2.25), "　　 ");
+        assert_eq!(indentation_prefix(99.0), "　　　　");
+    }
+
+    #[test]
+    fn reading_preview_values_are_clamped_before_rendering() {
+        let mut settings = AppSettings::default();
+        settings.background_opacity = 4.0;
+        settings.reading.font_size = 100;
+        settings.reading.first_line_indent = -2.0;
+        settings.reading.line_height = 9.0;
+        settings.reading.content_width = 1;
+
+        clamp_reading_preview(&mut settings);
+
+        assert_eq!(settings.background_opacity, 1.0);
+        assert_eq!(settings.reading.font_size, 36);
+        assert_eq!(settings.reading.first_line_indent, 0.0);
+        assert_eq!(settings.reading.line_height, 2.4);
+        assert_eq!(settings.reading.content_width, 480);
+    }
+
+    #[test]
+    fn shortcut_key_capture_formats_modifiers_and_control_keys() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            shortcut_from_key_event(&Key::Character("o".into()), modifiers).as_deref(),
+            Some("Ctrl+Shift+O")
+        );
+        assert_eq!(
+            shortcut_from_key_event(&Key::Named(NamedKey::Delete), ModifiersState::empty())
+                .as_deref(),
+            Some("Delete")
+        );
+    }
+
+    #[test]
+    fn editing_shortcuts_cover_save_undo_and_redo() {
+        let source = include_str!("main.rs");
+        assert!(source.contains("\"ctrl+s\" => ui.invoke_save_document()"));
+        assert!(source.contains("\"ctrl+shift+s\" => ui.invoke_save_document_as()"));
+        assert!(source.contains("\"ctrl+z\" => ui.invoke_undo_edit()"));
+        assert!(source.contains("\"ctrl+y\" | \"ctrl+shift+z\" => ui.invoke_redo_edit()"));
+    }
+
+    #[test]
+    fn search_results_are_numbered_chapter_labeled_and_bounded() {
+        let hits = (0..501)
+            .map(|index| SearchHit {
+                paragraph_index: index,
+                chapter_index: 2,
+                character_offset_in_paragraph: 0,
+                preview: format!("结果正文 {index}"),
+            })
+            .collect();
+
+        let presentation = search_items(hits);
+
+        assert_eq!(presentation.items.len(), 500);
+        assert!(presentation.truncated);
+        assert!(presentation.items[0].label.contains("序号 001"));
+        assert!(presentation.items[0].label.contains("第 3 章"));
+
+        let source = include_str!("../../../ui/readloom.slint");
+        assert!(source.contains("search-results-truncated ? \"500+\""));
+        assert!(!source.contains(": \"本地优先\""));
+    }
+
+    #[test]
+    fn background_settings_use_a_zero_to_hundred_slider_and_preview() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("component BackgroundSettingControl"));
+        assert!(source.contains("minimum: 0;"));
+        assert!(source.contains("maximum: 100;"));
+        assert!(source.contains("accessible-id: \"background-opacity-slider\";"));
+        assert!(source.contains("source: root.preview-image;"));
+        assert!(!source.contains("text: \"−10%\""));
+        assert!(!source.contains("text: \"+10%\""));
+    }
+
+    #[test]
+    fn delayed_setting_save_releases_the_shared_borrow_before_mutating_state() {
+        let source = include_str!("main.rs");
+        let dangerous_match = ["match core.save_settings(&settings.", "borrow())"].concat();
+
+        assert!(!source.contains(&dangerous_match));
     }
 
     #[test]
