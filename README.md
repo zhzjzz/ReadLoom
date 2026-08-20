@@ -71,4 +71,4 @@ src / src-tauri         保留的 Tauri/Svelte 功能与回归基线
 
 ## License
 
-MIT
+[MIT](LICENSE)
