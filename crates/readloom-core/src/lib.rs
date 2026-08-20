@@ -13,8 +13,9 @@ pub use core::{
     CoreError, LibraryDocument, LibraryGroup, LibrarySnapshot, ReadloomCore, StoredBookmark,
 };
 pub use editing::{
-    BlockId, ChapterKey, DocumentDraft, EditError, EditOperation, EditSession, EditableBlock,
-    SaveOutcome, SaveState, SaveTicket, ViewAnchor,
+    BlockId, ChapterKey, DocumentDraft, EditChange, EditCommand, EditError, EditSession,
+    EditableBlock, ImageMediaType, InsertSide, JoinDirection, SaveOutcome, SaveState, SaveTicket,
+    ValidatedImageAsset, ViewAnchor,
 };
 pub use epub::{EpubChapter, EpubDocument, EpubImageResource, EpubReadingLocator};
 pub use epub_edit::EpubDraft;
@@ -549,6 +550,33 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("格式无效")
+        );
+    }
+
+    #[test]
+    fn epub_image_import_validates_content_and_dimensions_before_editing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let core = ReadloomCore::open(&directory.path().join("state.sqlite3")).expect("open core");
+        let png = directory.path().join("illustration.not-really-png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([12, 34, 56, 255]))
+            .save_with_format(&png, image::ImageFormat::Png)
+            .expect("write valid PNG");
+
+        let asset = core
+            .validate_epub_image(&png)
+            .expect("validate EPUB image by content");
+
+        assert_eq!(asset.media_type, ImageMediaType::Png);
+        assert_eq!((asset.width, asset.height), (1, 1));
+        assert!(!asset.digest.is_empty());
+
+        let invalid = directory.path().join("spoofed.png");
+        std::fs::write(&invalid, b"not an image").expect("write spoofed image");
+        assert!(
+            core.validate_epub_image(&invalid)
+                .expect_err("reject spoofed image")
+                .to_string()
+                .contains("图片")
         );
     }
 }

@@ -1253,6 +1253,7 @@ export component MainWindow inherits Window {
     in-out property <int> edit-caret-byte: 0;
     in-out property <int> edit-restore-generation: 0;
     in-out property <float> edit-anchor-pixel-offset: 0;
+    in-out property <bool> view-anchor-restore-pending: false;
     in-out property <int> geometry-measure-generation: 0;
     in-out property <string> document-encoding: "UTF-8";
     in-out property <string> document-line-ending: "LF";
@@ -1357,6 +1358,7 @@ export component MainWindow inherits Window {
     callback add-bookmark();
     callback request-edit-mode(bool);
     callback replace-block-text(string, string, int);
+    callback join-adjacent-text(string, string, string, int, int) -> bool;
     callback report-block-geometry(string, float, float);
     callback request-geometry-measurement();
     callback capture-view-anchor(string, int, float);
@@ -1364,6 +1366,9 @@ export component MainWindow inherits Window {
     callback save-document-as();
     callback undo-edit();
     callback redo-edit();
+    callback insert-epub-image();
+    callback remove-epub-image(string);
+    callback set-epub-image-alt(string, string);
     callback resolve-dirty-decision(string);
     callback resolve-save-conflict(string);
     callback update-setting(string, string);
@@ -2115,6 +2120,7 @@ export component MainWindow inherits Window {
                             }
                             ActionButton { width: 58px; text: "撤销"; enabled: root.edit-mode && root.edit-can-undo; clicked => { root.undo-edit(); } }
                             ActionButton { width: 58px; text: "重做"; enabled: root.edit-mode && root.edit-can-redo; clicked => { root.redo-edit(); } }
+                            if root.document-kind == "EPUB" && root.edit-mode : ActionButton { width: 88px; text: "插入图片"; clicked => { root.insert-epub-image(); } }
                             ToolbarButton { width: 66px; icon: "search"; label: "搜索"; active: root.reader-side-panel == "search"; clicked => { root.reader-side-panel = "search"; } }
                             ToolbarButton { width: 84px; icon: "bookmark"; label: "书签 " + root.bookmarks.length; active: root.reader-side-panel == "bookmarks"; clicked => { root.reader-side-panel = "bookmarks"; } }
                             ActionButton { width: 58px; text: "关闭"; clicked => { root.close-open-document(root.document-path); } }
@@ -2319,10 +2325,21 @@ export component MainWindow inherits Window {
                                     padding-bottom: root.settings-vertical-margin * 1px;
                                     for paragraph in root.paragraphs : row := Rectangle {
                                     property <int> measure-generation: root.geometry-measure-generation;
+                                    property <string> live-edit-text: paragraph.text;
+                                    property <length> live-editor-height: Math.max(paragraph-editor-measure.preferred-height, root.settings-font-size * 1px);
                                     height: paragraph.kind == "image"
-                                        ? 300px
+                                        ? 352px
                                         : paragraph.kind == "blank"
                                         ? (root.settings-txt-blank-lines == "remove" ? 0px : 24px)
+                                        : root.edit-mode && paragraph.editable
+                                        ? paragraph.kind == "heading"
+                                        ? Math.max(76px + root.settings-paragraph-spacing * root.settings-font-size * 1px,
+                                            Math.max(self.live-editor-height, paragraph-body.preferred-height) * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
+                                            + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                            + 18px)
+                                        : Math.max(self.live-editor-height, paragraph-body.preferred-height) * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
+                                            + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                            + 18px
                                         : paragraph.kind == "heading"
                                             ? 76px + root.settings-paragraph-spacing * root.settings-font-size * 1px
                                             : paragraph-body.preferred-height * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
@@ -2358,14 +2375,30 @@ export component MainWindow inherits Window {
                                         horizontal-alignment: paragraph.kind == "heading" ? center : left;
                                         wrap: word-wrap;
                                     }
-                                    if root.edit-mode && paragraph.editable : paragraph-editor := TextInput {
-                                        property <int> restore-generation: root.edit-restore-generation;
+                                    paragraph-editor-measure := Text {
+                                        visible: root.edit-mode && paragraph.editable;
+                                        opacity: 0;
                                         x: paragraph-body.x;
                                         y: paragraph-body.y;
                                         width: paragraph-body.width;
-                                        height: Math.max(paragraph-body.preferred-height, parent.height - self.y - 13px);
+                                        text: row.live-edit-text;
+                                        font-family: paragraph-body.font-family;
+                                        font-size: paragraph-body.font-size;
+                                        font-weight: paragraph-body.font-weight;
+                                        letter-spacing: paragraph-body.letter-spacing;
+                                        horizontal-alignment: paragraph-body.horizontal-alignment;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.edit-mode && paragraph.editable : paragraph-editor := TextInput {
+                                        property <int> restore-generation: root.edit-restore-generation;
+                                        x: paragraph-body.x;
+                                        y: paragraph.kind == "blank" ? 0px : paragraph-body.y;
+                                        width: paragraph-body.width;
+                                        height: paragraph.kind == "blank"
+                                            ? parent.height
+                                            : Math.max(root.settings-font-size * 1px, parent.height - self.y - 5px);
                                         accessible-id: "inline-editor-" + paragraph.block-id;
-                                        text: paragraph.text;
+                                        text <=> row.live-edit-text;
                                         single-line: false;
                                         wrap: word-wrap;
                                         color: DesignTokens.reader-text;
@@ -2387,9 +2420,22 @@ export component MainWindow inherits Window {
                                             root.active-paragraph-index = paragraph.index;
                                             root.replace-block-text(paragraph.block-id, self.text, self.cursor-position_byte-offset);
                                         }
+                                        key-pressed(event) => {
+                                            if self.preedit-text.is-empty && self.cursor-position-byte-offset == self.anchor-position-byte-offset {
+                                                if event.text == Key.Backspace && root.join-adjacent-text(paragraph.block-id, "previous", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) {
+                                                    return accept;
+                                                }
+                                                if event.text == Key.Delete && root.join-adjacent-text(paragraph.block-id, "next", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) {
+                                                    return accept;
+                                                }
+                                            }
+                                            return reject;
+                                        }
                                         cursor-position-changed(position) => {
-                                            root.active-paragraph-index = paragraph.index;
-                                            root.capture-view-anchor(paragraph.block-id, self.cursor-position_byte-offset, self.y / 1px + row.y / 1px + root.reader-viewport-y / 1px);
+                                            if !root.view-anchor-restore-pending {
+                                                root.active-paragraph-index = paragraph.index;
+                                                root.capture-view-anchor(paragraph.block-id, self.cursor-position-byte-offset, self.y / 1px + row.y / 1px + root.reader-viewport-y / 1px);
+                                            }
                                         }
                                     }
                                     if paragraph.kind == "image" && paragraph.has-image : Image {
@@ -2400,7 +2446,33 @@ export component MainWindow inherits Window {
                                         source: paragraph.image;
                                         image-fit: contain;
                                     }
+                                    if root.edit-mode && paragraph.kind == "image" : image-alt-editor := LineEdit {
+                                        x: Math.max(root.settings-horizontal-margin * 1px, (parent.width - root.settings-content-width * 1px) / 2);
+                                        y: 304px;
+                                        width: Math.max(160px, Math.min(parent.width - root.settings-horizontal-margin * 2px, root.settings-content-width * 1px) - 96px);
+                                        height: 34px;
+                                        accessible-id: "image-alt-editor-" + paragraph.block-id;
+                                        text: paragraph.text;
+                                        placeholder-text: "图片替代文本";
+                                        edited => {
+                                            root.active-paragraph-index = paragraph.index;
+                                            root.set-epub-image-alt(paragraph.block-id, self.text);
+                                        }
+                                    }
+                                    if root.edit-mode && paragraph.kind == "image" : ActionButton {
+                                        x: Math.max(root.settings-horizontal-margin * 1px, (parent.width - root.settings-content-width * 1px) / 2)
+                                            + Math.max(160px, Math.min(parent.width - root.settings-horizontal-margin * 2px, root.settings-content-width * 1px) - 96px) + 8px;
+                                        y: 304px;
+                                        width: 88px;
+                                        height: 34px;
+                                        text: "删除图片";
+                                        clicked => {
+                                            root.active-paragraph-index = paragraph.index;
+                                            root.remove-epub-image(paragraph.block-id);
+                                        }
+                                    }
                                     TouchArea {
+                                        enabled: !root.edit-mode;
                                         clicked => {
                                             root.active-paragraph-index = paragraph.index;
                                             root.reading-position-changed(paragraph.index);
@@ -2427,10 +2499,29 @@ export component MainWindow inherits Window {
                                     padding-bottom: root.settings-vertical-margin * 1px;
                                     for pair in root.paragraph-rows : pair-row := Rectangle {
                                     property <int> measure-generation: root.geometry-measure-generation;
+                                    property <string> first-live-edit-text: pair.first.text;
+                                    property <string> second-live-edit-text: pair.has-second ? pair.second.text : "";
+                                    property <length> first-live-editor-height: Math.max(first-editor-measure.preferred-height, root.settings-font-size * 1px);
+                                    property <length> second-live-editor-height: Math.max(second-editor-measure.preferred-height, root.settings-font-size * 1px);
                                     height: pair.first.kind == "image" || (pair.has-second && pair.second.kind == "image")
-                                        ? 300px
+                                        ? 352px
                                         : pair.first.kind == "blank"
                                         ? 24px
+                                        : root.edit-mode && (pair.first.editable || (pair.has-second && pair.second.editable))
+                                        ? pair.first.kind == "heading"
+                                        ? Math.max(76px + root.settings-paragraph-spacing * root.settings-font-size * 1px,
+                                            Math.max(
+                                                pair.first.editable ? Math.max(self.first-live-editor-height, first-body.preferred-height) : first-body.preferred-height,
+                                                pair.has-second ? Math.max(self.second-live-editor-height, second-body.preferred-height) : 0px
+                                            ) * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
+                                                + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                                + 20px)
+                                        : Math.max(
+                                            pair.first.editable ? Math.max(self.first-live-editor-height, first-body.preferred-height) : first-body.preferred-height,
+                                            pair.has-second ? Math.max(self.second-live-editor-height, second-body.preferred-height) : 0px
+                                          ) * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
+                                            + (root.document-kind == "EPUB" && !root.settings-epub-override-paragraph-spacing ? 0.15 : root.settings-paragraph-spacing) * root.settings-font-size * 1px
+                                            + 20px
                                         : pair.first.kind == "heading"
                                             ? 76px + root.settings-paragraph-spacing * root.settings-font-size * 1px
                                             : Math.max(first-body.preferred-height, root.settings-font-size * 4px) * (root.document-kind == "EPUB" && !root.settings-epub-override-line-height ? 1.7 : root.settings-line-height) / 1.2
@@ -2459,8 +2550,8 @@ export component MainWindow inherits Window {
                                         horizontal-alignment: pair.first.kind == "heading" ? center : left;
                                         wrap: word-wrap;
                                     }
-                                    if pair.has-second : second-body := Text {
-                                        visible: pair.second.kind != "image" && (!root.edit-mode || !pair.second.editable);
+                                    second-body := Text {
+                                        visible: pair.has-second && pair.second.kind != "image" && (!root.edit-mode || !pair.second.editable);
                                         x: (parent.width - 28px) / 2 + 28px;
                                         y: 13px;
                                         width: (parent.width - 28px) / 2;
@@ -2473,23 +2564,58 @@ export component MainWindow inherits Window {
                                         letter-spacing: (root.settings-letter-spacing + (root.settings-text-alignment == "justify" ? 0.02 : 0)) * root.settings-font-size * 1px;
                                         wrap: word-wrap;
                                     }
+                                    first-editor-measure := Text {
+                                        visible: root.edit-mode && pair.first.editable;
+                                        opacity: 0;
+                                        x: first-body.x; y: first-body.y; width: first-body.width;
+                                        text: pair-row.first-live-edit-text;
+                                        font-family: first-body.font-family; font-size: first-body.font-size; font-weight: first-body.font-weight; letter-spacing: first-body.letter-spacing;
+                                        horizontal-alignment: first-body.horizontal-alignment;
+                                        wrap: word-wrap;
+                                    }
+                                    second-editor-measure := Text {
+                                        visible: pair.has-second;
+                                        opacity: 0;
+                                        x: (parent.width - 28px) / 2 + 28px; y: 13px; width: (parent.width - 28px) / 2;
+                                        text: pair-row.second-live-edit-text;
+                                        font-family: root.document-kind == "EPUB" && !root.settings-epub-override-font ? "Microsoft YaHei UI" : root.settings-font-family;
+                                        font-size: root.document-kind == "EPUB" && !root.settings-epub-override-font-size ? 18px : root.settings-font-size * 1px;
+                                        font-weight: root.settings-font-weight;
+                                        letter-spacing: (root.settings-letter-spacing + (root.settings-text-alignment == "justify" ? 0.02 : 0)) * root.settings-font-size * 1px;
+                                        horizontal-alignment: left;
+                                        wrap: word-wrap;
+                                    }
                                     if root.edit-mode && pair.first.editable : first-editor := TextInput {
                                         property <int> restore-generation: root.edit-restore-generation;
-                                        x: first-body.x; y: first-body.y; width: first-body.width; height: Math.max(first-body.preferred-height, parent.height - self.y - 13px);
+                                        x: first-body.x; y: pair.first.kind == "blank" ? 0px : first-body.y; width: first-body.width;
+                                        height: pair.first.kind == "blank" ? parent.height : Math.max(root.settings-font-size * 1px, parent.height - self.y - 5px);
                                         accessible-id: "inline-editor-" + pair.first.block-id;
-                                        text: pair.first.text; single-line: false; wrap: word-wrap; color: DesignTokens.reader-text;
+                                        text <=> pair-row.first-live-edit-text; single-line: false; wrap: word-wrap; color: DesignTokens.reader-text;
                                         selection-background-color: DesignTokens.accent-muted; selection-foreground-color: DesignTokens.reader-text;
                                         font-family: first-body.font-family; font-size: first-body.font-size; font-weight: first-body.font-weight; letter-spacing: first-body.letter-spacing;
                                         text-cursor-width: 1px;
                                         changed restore-generation => { if root.edit-anchor-block-id == pair.first.block-id { self.focus(); self.set-selection-offsets(root.edit-caret-byte, root.edit-caret-byte); } }
                                         edited => { root.active-paragraph-index = pair.first.index; root.replace-block-text(pair.first.block-id, self.text, self.cursor-position_byte-offset); }
-                                        cursor-position-changed(position) => { root.active-paragraph-index = pair.first.index; root.capture-view-anchor(pair.first.block-id, self.cursor-position_byte-offset, self.y / 1px + pair-row.y / 1px + root.reader-viewport-y / 1px); }
+                                        key-pressed(event) => {
+                                            if self.preedit-text.is-empty && self.cursor-position-byte-offset == self.anchor-position-byte-offset {
+                                                if event.text == Key.Backspace && root.join-adjacent-text(pair.first.block-id, "previous", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) { return accept; }
+                                                if event.text == Key.Delete && root.join-adjacent-text(pair.first.block-id, "next", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) { return accept; }
+                                            }
+                                            return reject;
+                                        }
+                                        cursor-position-changed(position) => {
+                                            if !root.view-anchor-restore-pending {
+                                                root.active-paragraph-index = pair.first.index;
+                                                root.capture-view-anchor(pair.first.block-id, self.cursor-position-byte-offset, self.y / 1px + pair-row.y / 1px + root.reader-viewport-y / 1px);
+                                            }
+                                        }
                                     }
                                     if root.edit-mode && pair.has-second && pair.second.editable : second-editor := TextInput {
                                         property <int> restore-generation: root.edit-restore-generation;
-                                        x: (parent.width - 28px) / 2 + 28px; y: 13px; width: (parent.width - 28px) / 2; height: parent.height - 26px;
+                                        x: (parent.width - 28px) / 2 + 28px; y: pair.second.kind == "blank" ? 0px : 13px; width: (parent.width - 28px) / 2;
+                                        height: pair.second.kind == "blank" ? parent.height : Math.max(root.settings-font-size * 1px, parent.height - self.y - 5px);
                                         accessible-id: "inline-editor-" + pair.second.block-id;
-                                        text: pair.second.text; single-line: false; wrap: word-wrap; color: DesignTokens.reader-text;
+                                        text <=> pair-row.second-live-edit-text; single-line: false; wrap: word-wrap; color: DesignTokens.reader-text;
                                         selection-background-color: DesignTokens.accent-muted; selection-foreground-color: DesignTokens.reader-text;
                                         font-family: root.document-kind == "EPUB" && !root.settings-epub-override-font ? "Microsoft YaHei UI" : root.settings-font-family;
                                         font-size: root.document-kind == "EPUB" && !root.settings-epub-override-font-size ? 18px : root.settings-font-size * 1px;
@@ -2498,7 +2624,19 @@ export component MainWindow inherits Window {
                                         text-cursor-width: 1px;
                                         changed restore-generation => { if root.edit-anchor-block-id == pair.second.block-id { self.focus(); self.set-selection-offsets(root.edit-caret-byte, root.edit-caret-byte); } }
                                         edited => { root.active-paragraph-index = pair.second.index; root.replace-block-text(pair.second.block-id, self.text, self.cursor-position_byte-offset); }
-                                        cursor-position-changed(position) => { root.active-paragraph-index = pair.second.index; root.capture-view-anchor(pair.second.block-id, self.cursor-position_byte-offset, self.y / 1px + pair-row.y / 1px + root.reader-viewport-y / 1px); }
+                                        key-pressed(event) => {
+                                            if self.preedit-text.is-empty && self.cursor-position-byte-offset == self.anchor-position-byte-offset {
+                                                if event.text == Key.Backspace && root.join-adjacent-text(pair.second.block-id, "previous", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) { return accept; }
+                                                if event.text == Key.Delete && root.join-adjacent-text(pair.second.block-id, "next", self.text, self.cursor-position-byte-offset, self.anchor-position-byte-offset) { return accept; }
+                                            }
+                                            return reject;
+                                        }
+                                        cursor-position-changed(position) => {
+                                            if !root.view-anchor-restore-pending {
+                                                root.active-paragraph-index = pair.second.index;
+                                                root.capture-view-anchor(pair.second.block-id, self.cursor-position-byte-offset, self.y / 1px + pair-row.y / 1px + root.reader-viewport-y / 1px);
+                                            }
+                                        }
                                     }
                                     if pair.first.kind == "image" && pair.first.has-image : Image {
                                         x: 0px;
@@ -2516,11 +2654,33 @@ export component MainWindow inherits Window {
                                         source: pair.second.image;
                                         image-fit: contain;
                                     }
+                                    if root.edit-mode && pair.first.kind == "image" : first-image-alt := LineEdit {
+                                        x: 0px; y: 304px; width: Math.max(100px, (parent.width - 28px) / 2 - 88px); height: 34px;
+                                        accessible-id: "image-alt-editor-" + pair.first.block-id;
+                                        text: pair.first.text; placeholder-text: "图片替代文本";
+                                        edited => { root.active-paragraph-index = pair.first.index; root.set-epub-image-alt(pair.first.block-id, self.text); }
+                                    }
+                                    if root.edit-mode && pair.first.kind == "image" : ActionButton {
+                                        x: Math.max(100px, (parent.width - 28px) / 2 - 88px) + 6px; y: 304px; width: 82px; height: 34px; text: "删除图片";
+                                        clicked => { root.active-paragraph-index = pair.first.index; root.remove-epub-image(pair.first.block-id); }
+                                    }
+                                    if root.edit-mode && pair.has-second && pair.second.kind == "image" : second-image-alt := LineEdit {
+                                        x: (parent.width - 28px) / 2 + 28px; y: 304px; width: Math.max(100px, (parent.width - 28px) / 2 - 88px); height: 34px;
+                                        accessible-id: "image-alt-editor-" + pair.second.block-id;
+                                        text: pair.second.text; placeholder-text: "图片替代文本";
+                                        edited => { root.active-paragraph-index = pair.second.index; root.set-epub-image-alt(pair.second.block-id, self.text); }
+                                    }
+                                    if root.edit-mode && pair.has-second && pair.second.kind == "image" : ActionButton {
+                                        x: (parent.width - 28px) / 2 + 28px + Math.max(100px, (parent.width - 28px) / 2 - 88px) + 6px; y: 304px; width: 82px; height: 34px; text: "删除图片";
+                                        clicked => { root.active-paragraph-index = pair.second.index; root.remove-epub-image(pair.second.block-id); }
+                                    }
                                     TouchArea {
+                                        enabled: !root.edit-mode;
                                         x: first-body.x; y: 0px; width: first-body.width; height: parent.height;
                                         clicked => { root.active-paragraph-index = pair.first.index; root.reading-position-changed(pair.first.index); }
                                     }
                                     if pair.has-second : TouchArea {
+                                        enabled: !root.edit-mode;
                                         x: (parent.width - 28px) / 2 + 28px;
                                         y: 0px;
                                         width: (parent.width - 28px) / 2;

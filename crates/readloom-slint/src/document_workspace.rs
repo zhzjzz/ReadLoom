@@ -5,8 +5,8 @@ use std::{
 };
 
 use readloom_core::{
-    BlockId, DocumentDraft, EditError, EditSession, EpubDraft, SaveOutcome, SaveTicket, TxtDraft,
-    ViewAnchor,
+    DocumentDraft, EditChange, EditCommand, EditError, EditSession, EpubDraft, SaveOutcome,
+    SaveTicket, TxtDraft, ViewAnchor,
 };
 
 use crate::OpenDocument;
@@ -103,16 +103,11 @@ impl DocumentSession {
         Ok(())
     }
 
-    pub(crate) fn replace_block_text(
-        &self,
-        block_id: &BlockId,
-        text: String,
-        caret_utf16: usize,
-    ) -> Result<bool, EditError> {
+    pub(crate) fn apply_edit(&self, command: EditCommand) -> Result<EditChange, EditError> {
         self.edit_session()
             .ok_or(EditError::MissingBlock)?
             .borrow_mut()
-            .replace_block_text(block_id, text, caret_utf16)
+            .apply(command)
     }
 
     pub(crate) fn begin_save(&self) -> Option<(OpenDocument, SaveTicket)> {
@@ -338,7 +333,11 @@ mod tests {
         };
         first_session.begin_edit(first_anchor.clone()).unwrap();
         first_session
-            .replace_block_text(&first_block, "第一本的中文草稿".to_owned(), 8)
+            .apply_edit(EditCommand::ReplaceText {
+                block_id: first_block.clone(),
+                text: "第一本的中文草稿".to_owned(),
+                caret_utf16: 8,
+            })
             .unwrap();
 
         workspace.activate(&second);
@@ -384,7 +383,11 @@ mod tests {
             })
             .unwrap();
         session
-            .replace_block_text(&block, "未保存".to_owned(), 3)
+            .apply_edit(EditCommand::ReplaceText {
+                block_id: block,
+                text: "未保存".to_owned(),
+                caret_utf16: 3,
+            })
             .unwrap();
 
         let result = workspace.close(open.path().unwrap());

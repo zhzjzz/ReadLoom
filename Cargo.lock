@@ -4024,6 +4024,7 @@ dependencies = [
  "blake3",
  "chardetng",
  "encoding_rs",
+ "image",
  "quick-xml 0.40.1",
  "rbook",
  "regex",

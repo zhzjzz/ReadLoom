@@ -9,6 +9,7 @@ license.workspace = true
 blake3.workspace = true
 chardetng.workspace = true
 encoding_rs.workspace = true
+image.workspace = true
 quick-xml.workspace = true
 regex.workspace = true
 rbook.workspace = true

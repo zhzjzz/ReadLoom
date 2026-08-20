@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use readloom_core::{BlockId, ChapterKey, EditableBlock, ViewAnchor};
+use readloom_core::{BlockId, ChapterKey, ViewAnchor};
+
+#[cfg(test)]
+use readloom_core::EditableBlock;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BlockGeometry {
@@ -19,10 +22,15 @@ impl ViewportAnchorController {
         self.geometry.clear();
         self.block_order.clear();
     }
+    #[cfg(test)]
     pub(crate) fn set_blocks<'a>(&mut self, blocks: impl IntoIterator<Item = &'a EditableBlock>) {
-        self.block_order = blocks.into_iter().map(|block| block.id.clone()).collect();
-        self.geometry
-            .retain(|block_id, _| self.block_order.contains(block_id));
+        self.set_block_ids(blocks.into_iter().map(|block| &block.id));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_block_ids<'a>(&mut self, block_ids: impl IntoIterator<Item = &'a BlockId>) {
+        self.block_order = block_ids.into_iter().cloned().collect();
+        self.geometry.clear();
     }
 
     pub(crate) fn report_geometry(&mut self, block_id: BlockId, y: f32, height: f32) {
@@ -45,12 +53,18 @@ impl ViewportAnchorController {
             let geometry = self.geometry.get(block_id)?;
             Some((block_id, geometry.y + viewport_y))
         });
-        let top_visible = self.block_order.iter().find_map(|block_id| {
+        let first_with_visible_top = self.block_order.iter().find_map(|block_id| {
+            let geometry = self.geometry.get(block_id)?;
+            let pixel = geometry.y + viewport_y;
+            (pixel >= 0.0).then_some((block_id, pixel))
+        });
+        let intersecting = self.block_order.iter().find_map(|block_id| {
             let geometry = self.geometry.get(block_id)?;
             let pixel = geometry.y + viewport_y;
             (pixel + geometry.height >= 0.0).then_some((block_id, pixel))
         });
-        let (block_id, pixel_offset_from_viewport_top) = preferred.or(top_visible)?;
+        let (block_id, pixel_offset_from_viewport_top) =
+            preferred.or(first_with_visible_top).or(intersecting)?;
         Some(ViewAnchor {
             chapter_key,
             block_id: block_id.clone(),
@@ -63,38 +77,6 @@ impl ViewportAnchorController {
         self.geometry
             .get(&anchor.block_id)
             .map(|geometry| anchor.pixel_offset_from_viewport_top - geometry.y)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resolve_surviving_anchor(
-        &self,
-        anchor: &ViewAnchor,
-        previous_order: &[BlockId],
-    ) -> Option<ViewAnchor> {
-        if self.geometry.contains_key(&anchor.block_id) {
-            return Some(anchor.clone());
-        }
-        let old_index = previous_order
-            .iter()
-            .position(|block_id| block_id == &anchor.block_id)
-            .unwrap_or(0);
-        let fallback = previous_order
-            .iter()
-            .skip(old_index.saturating_add(1))
-            .find(|block_id| self.geometry.contains_key(*block_id))
-            .or_else(|| {
-                previous_order
-                    .iter()
-                    .take(old_index)
-                    .rev()
-                    .find(|block_id| self.geometry.contains_key(*block_id))
-            })
-            .or_else(|| self.block_order.first())?;
-        Some(ViewAnchor {
-            block_id: fallback.clone(),
-            character_offset_utf16: 0,
-            ..anchor.clone()
-        })
     }
 }
 
@@ -156,25 +138,41 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_anchor_falls_forward_then_backward_deterministically() {
-        let previous = vec![BlockId::new("a"), BlockId::new("b"), BlockId::new("c")];
+    fn replacing_the_presentation_model_invalidates_stale_geometry() {
+        let blocks = [block("a"), block("b")];
         let mut controller = ViewportAnchorController::default();
-        controller.set_blocks(&[block("a"), block("c")]);
-        controller.report_geometry(BlockId::new("a"), 0.0, 30.0);
-        controller.report_geometry(BlockId::new("c"), 30.0, 30.0);
-        let deleted = ViewAnchor {
+        controller.set_blocks(&blocks);
+        controller.report_geometry(BlockId::new("b"), 91.25, 183.75);
+        let anchor = ViewAnchor {
             chapter_key: ChapterKey::new("chapter"),
             block_id: BlockId::new("b"),
-            character_offset_utf16: 9,
-            pixel_offset_from_viewport_top: -2.0,
+            character_offset_utf16: 0,
+            pixel_offset_from_viewport_top: -20.0,
         };
+        assert!(controller.viewport_y_for(&anchor).is_some());
 
-        let resolved = controller
-            .resolve_surviving_anchor(&deleted, &previous)
-            .expect("fallback anchor");
+        controller.set_blocks(&blocks);
 
-        assert_eq!(resolved.block_id, BlockId::new("c"));
-        assert_eq!(resolved.character_offset_utf16, 0);
+        assert!(
+            controller.viewport_y_for(&anchor).is_none(),
+            "a new model must wait for its own geometry instead of restoring from stale rows"
+        );
+    }
+
+    #[test]
+    fn viewport_capture_prefers_the_first_block_whose_top_is_visible() {
+        let blocks = [block("estimated-tall"), block("actually-visible")];
+        let mut controller = ViewportAnchorController::default();
+        controller.set_blocks(&blocks);
+        controller.report_geometry(BlockId::new("estimated-tall"), 0.0, 240.0);
+        controller.report_geometry(BlockId::new("actually-visible"), 200.0, 40.0);
+
+        let anchor = controller
+            .capture(ChapterKey::new("chapter"), None, 0, -150.0)
+            .expect("visible anchor");
+
+        assert_eq!(anchor.block_id, BlockId::new("actually-visible"));
+        assert_eq!(anchor.pixel_offset_from_viewport_top, 50.0);
     }
 
     #[test]

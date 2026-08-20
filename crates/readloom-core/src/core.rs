@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::Mutex,
     sync::atomic::{AtomicU64, Ordering},
@@ -10,14 +10,17 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    AppSettings, EpubDocument, EpubDraft, EpubReadingLocator, ReaderDocument, TextReadingLocator,
-    TxtDraft,
+    AppSettings, EpubDocument, EpubDraft, EpubReadingLocator, ImageMediaType, ReaderDocument,
+    TextReadingLocator, TxtDraft, ValidatedImageAsset,
     text_codec::{LineEnding, SaveTextOptions, decode_text, encode_text},
 };
 
 const SCHEMA_VERSION: i64 = 4;
 const MAXIMUM_TEXT_BYTES: u64 = 160 * 1024 * 1024;
 const MAXIMUM_BACKGROUND_BYTES: u64 = 20 * 1024 * 1024;
+const MAXIMUM_EPUB_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+const MAXIMUM_EPUB_IMAGE_DIMENSION: u32 = 16_384;
+const MAXIMUM_EPUB_IMAGE_PIXELS: u64 = 64_000_000;
 static SAVE_ARTIFACT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -161,6 +164,70 @@ impl ReadloomCore {
             let _ = fs::remove_file(path);
         }
         Ok(())
+    }
+
+    pub fn validate_epub_image(&self, source: &Path) -> Result<ValidatedImageAsset, CoreError> {
+        let metadata = fs::metadata(source)?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAXIMUM_EPUB_IMAGE_BYTES {
+            return Err(CoreError::Validation(
+                "EPUB 图片必须是小于 20 MiB 的 PNG、JPEG、GIF 或 WebP 文件。".to_owned(),
+            ));
+        }
+        let bytes = fs::read(source)?;
+        let media_type = match image::guess_format(&bytes) {
+            Ok(image::ImageFormat::Png) if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => {
+                ImageMediaType::Png
+            }
+            Ok(image::ImageFormat::Jpeg) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => {
+                ImageMediaType::Jpeg
+            }
+            Ok(image::ImageFormat::Gif)
+                if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") =>
+            {
+                ImageMediaType::Gif
+            }
+            Ok(image::ImageFormat::WebP)
+                if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") =>
+            {
+                ImageMediaType::Webp
+            }
+            _ => {
+                return Err(CoreError::Validation(
+                    "图片内容无效，仅支持 PNG、JPEG、GIF 或 WebP。".to_owned(),
+                ));
+            }
+        };
+        let format = match media_type {
+            ImageMediaType::Png => image::ImageFormat::Png,
+            ImageMediaType::Jpeg => image::ImageFormat::Jpeg,
+            ImageMediaType::Gif => image::ImageFormat::Gif,
+            ImageMediaType::Webp => image::ImageFormat::WebP,
+        };
+        let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAXIMUM_EPUB_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAXIMUM_EPUB_IMAGE_DIMENSION);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        reader.limits(limits);
+        let decoded = reader.decode().map_err(|_| {
+            CoreError::Validation("图片无法安全解码，可能已损坏或尺寸过大。".to_owned())
+        })?;
+        let (width, height) = (decoded.width(), decoded.height());
+        if width == 0
+            || height == 0
+            || u64::from(width) * u64::from(height) > MAXIMUM_EPUB_IMAGE_PIXELS
+        {
+            return Err(CoreError::Validation(
+                "图片尺寸过大；像素总量必须不超过 6400 万。".to_owned(),
+            ));
+        }
+        Ok(ValidatedImageAsset {
+            digest: blake3::hash(&bytes).to_hex().to_string(),
+            bytes: bytes.into(),
+            media_type,
+            width,
+            height,
+        })
     }
 
     pub fn open_txt(&self, path: &Path) -> Result<ReaderDocument, CoreError> {

@@ -21,10 +21,10 @@ const MAXIMUM_SEARCH_RESULTS: usize = 500;
 
 use readloom_core::{
     AppSettings, AppTheme, BlockId, ChapterKey, ChapterTitleStyle, DEFAULT_TXT_CHAPTER_PATTERN,
-    DocumentDraft, EditSession, EpubDocument, EpubImageResource, EpubReadingLocator,
-    LibraryDocument, ParagraphKind, ReaderDocument, ReadingParagraph, ReadingSettings,
-    ReadloomCore, SaveTicket, SearchHit, TextAlignment, TxtBlankLines, TxtLeadingIndent,
-    ViewAnchor, WindowCloseAction,
+    DocumentDraft, EditCommand, EditSession, EditableBlock, EpubDocument, EpubImageResource,
+    EpubReadingLocator, InsertSide, JoinDirection, LibraryDocument, ParagraphKind, ReaderDocument,
+    ReadingParagraph, ReadingSettings, ReadloomCore, SaveTicket, SearchHit, TextAlignment,
+    TxtBlankLines, TxtLeadingIndent, ViewAnchor, WindowCloseAction,
 };
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
@@ -35,6 +35,7 @@ use slint::{
 mod background_images;
 mod document_workspace;
 mod edit_session;
+mod epub_image_import;
 mod reader_images;
 
 use background_images::{
@@ -42,6 +43,7 @@ use background_images::{
 };
 use document_workspace::DocumentWorkspace;
 use edit_session::{ViewportAnchorController, byte_offset_for_utf16, utf16_offset_for_byte};
+use epub_image_import::{EpubImageImportRequest, spawn_epub_image_import_worker};
 use reader_images::{ReaderImageKey, ReaderImagePipeline};
 
 slint::include_modules!();
@@ -85,6 +87,13 @@ impl OpenDocument {
         match self {
             Self::Txt(document) => Arc::new(document.paragraphs().to_vec()),
             Self::Epub(document) => document.paragraphs(),
+        }
+    }
+
+    fn paragraph_at(&self, index: usize) -> Option<ReadingParagraph> {
+        match self {
+            Self::Txt(document) => document.paragraphs().get(index).cloned(),
+            Self::Epub(document) => document.paragraphs().get(index).cloned(),
         }
     }
 }
@@ -190,11 +199,10 @@ thread_local! {
 
 struct ReaderParagraphModel {
     document: OpenDocument,
-    epub_paragraphs: Option<Arc<Vec<ReadingParagraph>>>,
+    presented_paragraphs: Arc<Vec<ReadingParagraph>>,
     epub_images: Option<Arc<Vec<EpubImageResource>>>,
     epub_fingerprint: Option<Arc<str>>,
     epub_chapter_index: usize,
-    edit: Option<Rc<RefCell<EditSession>>>,
     range: Range<usize>,
     notify: ModelNotify,
 }
@@ -234,36 +242,163 @@ impl ReaderParagraphModel {
         range: Range<usize>,
         edit: Option<Rc<RefCell<EditSession>>>,
     ) -> Self {
-        let (epub_paragraphs, epub_images, epub_fingerprint, epub_chapter_index) = match &document {
-            OpenDocument::Epub(document) => (
-                Some(document.paragraphs()),
-                Some(document.images()),
-                Some(Arc::from(document.fingerprint())),
-                document.active_chapter_index(),
-            ),
-            OpenDocument::Txt(_) => (None, None, None, 0),
-        };
+        let requested_range = range.clone();
+        let (presented_paragraphs, epub_images, epub_fingerprint, epub_chapter_index) =
+            match &document {
+                OpenDocument::Epub(document) => {
+                    let original_paragraphs = document.paragraphs();
+                    let mut images = document.images().as_ref().clone();
+                    let mut fingerprint = Arc::from(document.fingerprint());
+                    let presented = edit.as_ref().and_then(|edit| {
+                        let edit = edit.borrow();
+                        let DocumentDraft::Epub(draft) = edit.draft() else {
+                            return None;
+                        };
+                        fingerprint = Arc::from(format!(
+                            "{}:edit:{}",
+                            document.fingerprint(),
+                            edit.revision()
+                        ));
+                        Some(
+                            draft
+                                .blocks()
+                                .get(requested_range.clone())
+                                .unwrap_or_default()
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, block)| {
+                                    let original = original_paragraphs
+                                        .iter()
+                                        .find(|paragraph| paragraph.block_id == block.id);
+                                    let image_index = if let Some(paragraph) = original {
+                                        paragraph.image_index
+                                    } else if let Some(asset) =
+                                        draft.imported_image_asset(&block.id)
+                                    {
+                                        let image_index = images.len();
+                                        images.push(EpubImageResource {
+                                            media_type: asset.media_type.media_type().to_owned(),
+                                            bytes: asset.bytes.clone(),
+                                            alt_text: block.text.clone(),
+                                        });
+                                        Some(image_index)
+                                    } else {
+                                        None
+                                    };
+                                    ReadingParagraph {
+                                        block_id: block.id.clone(),
+                                        editable: block.editable,
+                                        kind: block.kind,
+                                        text: block.text.clone(),
+                                        source_start: original
+                                            .map_or(0, |paragraph| paragraph.source_start),
+                                        source_end: original
+                                            .map_or(0, |paragraph| paragraph.source_end),
+                                        source_start_utf16: original
+                                            .map_or(0, |paragraph| paragraph.source_start_utf16),
+                                        source_end_utf16: original
+                                            .map_or(0, |paragraph| paragraph.source_end_utf16),
+                                        line_number: original
+                                            .map_or(0, |paragraph| paragraph.line_number),
+                                        chapter_index: original
+                                            .map_or(document.active_chapter_index(), |paragraph| {
+                                                paragraph.chapter_index
+                                            }),
+                                        paragraph_index: requested_range.start + offset,
+                                        image_index,
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+                    (
+                        Arc::new(presented.unwrap_or_else(|| {
+                            original_paragraphs
+                                .get(requested_range.clone())
+                                .unwrap_or_default()
+                                .to_vec()
+                        })),
+                        Some(Arc::new(images)),
+                        Some(fingerprint),
+                        document.active_chapter_index(),
+                    )
+                }
+                OpenDocument::Txt(document) => {
+                    let original_paragraphs = document.paragraphs();
+                    let presented = edit.as_ref().and_then(|edit| {
+                        let edit = edit.borrow();
+                        let DocumentDraft::Txt(draft) = edit.draft() else {
+                            return None;
+                        };
+                        Some(
+                            draft
+                                .blocks()
+                                .get(requested_range.clone())
+                                .unwrap_or_default()
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, block)| {
+                                    let global_index = requested_range.start + offset;
+                                    let original = original_paragraphs
+                                        .get(global_index)
+                                        .filter(|paragraph| paragraph.block_id == block.id);
+                                    ReadingParagraph {
+                                        block_id: block.id.clone(),
+                                        editable: block.editable,
+                                        kind: block.kind,
+                                        text: block.text.clone(),
+                                        source_start: original
+                                            .map_or(0, |paragraph| paragraph.source_start),
+                                        source_end: original
+                                            .map_or(0, |paragraph| paragraph.source_end),
+                                        source_start_utf16: original
+                                            .map_or(0, |paragraph| paragraph.source_start_utf16),
+                                        source_end_utf16: original
+                                            .map_or(0, |paragraph| paragraph.source_end_utf16),
+                                        line_number: original
+                                            .map_or(0, |paragraph| paragraph.line_number),
+                                        chapter_index: original.map_or_else(
+                                            || txt_chapter_index(&block.chapter_key),
+                                            |paragraph| paragraph.chapter_index,
+                                        ),
+                                        paragraph_index: global_index,
+                                        image_index: None,
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+                    (
+                        Arc::new(presented.unwrap_or_else(|| {
+                            original_paragraphs
+                                .get(requested_range.clone())
+                                .unwrap_or_default()
+                                .to_vec()
+                        })),
+                        None,
+                        None,
+                        0,
+                    )
+                }
+            };
+        let range = range.start..range.start + presented_paragraphs.len();
         Self {
             document,
-            epub_paragraphs,
+            presented_paragraphs,
             epub_images,
             epub_fingerprint,
             epub_chapter_index,
-            edit,
             range,
             notify: ModelNotify::default(),
         }
     }
 
     fn paragraphs(&self) -> &[ReadingParagraph] {
-        match &self.document {
-            OpenDocument::Txt(document) => document.paragraphs(),
-            OpenDocument::Epub(_) => self.epub_paragraphs.as_deref().map_or(&[], Vec::as_slice),
-        }
+        self.presented_paragraphs.as_slice()
     }
 
     fn window_paragraphs(&self) -> &[ReadingParagraph] {
-        &self.paragraphs()[self.range.clone()]
+        self.paragraphs()
     }
 
     fn presented_paragraph(&self, global_index: usize) -> Option<&ReadingParagraph> {
@@ -310,20 +445,10 @@ impl ReaderParagraphModel {
             _ => Image::default(),
         };
         let has_image = image.size().width > 0;
-        let text = self
-            .edit
-            .as_ref()
-            .and_then(|edit| {
-                edit.borrow()
-                    .draft()
-                    .block(&paragraph.block_id)
-                    .map(|block| block.text.clone())
-            })
-            .unwrap_or_else(|| paragraph.text.clone());
         ParagraphItem {
             block_id: paragraph.block_id.as_str().into(),
             editable: paragraph.editable,
-            text: text.into(),
+            text: paragraph.text.clone().into(),
             kind: paragraph_kind_name(paragraph.kind),
             index: as_i32(paragraph.paragraph_index),
             chapter_index: as_i32(paragraph.chapter_index),
@@ -357,12 +482,12 @@ impl Model for ReaderParagraphModel {
     type Data = ParagraphItem;
 
     fn row_count(&self) -> usize {
-        self.range.len()
+        self.presented_paragraphs.len()
     }
 
     fn row_data(&self, row: usize) -> Option<Self::Data> {
         self.paragraphs()
-            .get(self.range.start.checked_add(row)?)
+            .get(row)
             .map(|paragraph| self.paragraph_item(paragraph))
     }
 
@@ -426,12 +551,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (chapter_load_sender, chapter_load_receiver) = mpsc::channel::<ChapterLoadResult>();
     let (search_sender, search_receiver) = mpsc::channel::<SearchTaskResult>();
     let (edit_save_sender, edit_save_receiver) = mpsc::channel::<EditSaveResult>();
+    let (epub_image_import_sender, epub_image_import_receiver) =
+        spawn_epub_image_import_worker(core.clone());
     let (background_image_sender, background_image_receiver) =
         spawn_background_image_worker(core.clone());
     let active_load_request = Rc::new(Cell::new(0_u64));
     let active_chapter_request = Rc::new(Cell::new(0_u64));
     let active_search_request = Rc::new(Cell::new(0_u64));
     let active_background_image_request = Rc::new(Cell::new(1_u64));
+    let active_epub_image_import_request = Rc::new(Cell::new(0_u64));
     let viewport_anchors = Rc::new(RefCell::new(ViewportAnchorController::default()));
     let document_load_timer = Timer::default();
     apply_settings(&ui, &settings.borrow());
@@ -541,9 +669,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_view_anchor_restore_pending() {
+                return;
+            }
             let Some(session) = workspace.active_session() else {
                 return;
             };
+            let editing = ui.get_edit_mode();
             let document = session.presentation_document();
             let current_index = ui.get_active_paragraph_index().max(0) as usize;
             let Some(mut anchor) = viewport_anchors.borrow().capture(
@@ -564,12 +696,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return;
             };
+            let presented_range = paragraph_model.map(|model| model.range.clone());
             anchor.chapter_key =
                 ChapterKey::new(format!("{}:{}", document.kind(), resolved.chapter_index));
-            session.set_anchor(anchor);
+            if !editing {
+                session.set_anchor(anchor.clone());
+            }
             if resolved.index != current_index {
-                ui.set_active_paragraph_index(as_i32(resolved.index));
-                ui.invoke_reading_position_changed(as_i32(resolved.index));
+                let moving_forward = resolved.index > current_index;
+                if !editing {
+                    ui.set_active_paragraph_index(as_i32(resolved.index));
+                    ui.invoke_reading_position_changed(as_i32(resolved.index));
+                }
+                if let Some(range) = presented_range
+                    && let Some(start) = reader_window_shift_start(
+                        range,
+                        ui.get_document_paragraph_count().max(0) as usize,
+                        resolved.index,
+                        moving_forward,
+                    )
+                {
+                    ui.set_view_anchor_restore_pending(true);
+                    viewport_anchors.borrow_mut().clear();
+                    set_reader_models_with_preferred_start(
+                        &ui,
+                        document,
+                        resolved.index,
+                        Some(start),
+                        session.edit_session(),
+                    );
+                    if editing {
+                        restore_view_anchor_after_layout_with_viewport(
+                            &ui,
+                            &session,
+                            &viewport_anchors,
+                            anchor,
+                        );
+                    } else {
+                        restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
+                    }
+                }
             }
         });
     }
@@ -626,6 +792,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let active_chapter_request = active_chapter_request.clone();
         let active_search_request = active_search_request.clone();
         let active_background_image_request = active_background_image_request.clone();
+        let active_epub_image_import_request = active_epub_image_import_request.clone();
         let viewport_anchors = viewport_anchors.clone();
         document_load_timer.start(TimerMode::Repeated, BACKGROUND_RESULT_POLL_INTERVAL, move || {
             if let Some(ui) = weak.upgrade() {
@@ -801,6 +968,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_save_conflict_open(true);
                         }
                     }
+                }
+            }
+            while let Ok(message) = epub_image_import_receiver.try_recv() {
+                if message.request_id != active_epub_image_import_request.get()
+                    || workspace.active_path().as_deref() != Some(message.document_path.as_path())
+                {
+                    continue;
+                }
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let Some(session) = workspace.session(&message.document_path) else {
+                    continue;
+                };
+                let Some(edit) = session.edit_session() else {
+                    continue;
+                };
+                if edit.borrow().revision() != message.revision {
+                    ui.set_status_text(
+                        "图片校验期间草稿已变化；为避免插入到过期位置，请重新选择。".into(),
+                    );
+                    continue;
+                }
+                match message.result {
+                    Ok(asset) => match session.apply_edit(EditCommand::InsertEpubImage {
+                        anchor_block_id: message.anchor_block_id,
+                        side: message.side,
+                        asset,
+                        alt_text: message.alt_text,
+                    }) {
+                        Ok(change) => refresh_after_structural_edit(
+                            &ui,
+                            &session,
+                            &viewport_anchors,
+                            change.affected_block_id(),
+                            "图片已加入草稿；保存后会同步更新 XHTML、manifest 与 EPUB 条目。",
+                        ),
+                        Err(error) => ui.set_status_text(error.to_string().into()),
+                    },
+                    Err(error) => ui.set_status_text(error.into()),
                 }
             }
             while let Ok(message) = background_image_receiver.try_recv() {
@@ -1486,14 +1693,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let document = session.presentation_document();
             let active_index = ui.get_active_paragraph_index().max(0) as usize;
-            let paragraphs = document.paragraphs();
-            let Some(paragraph) = paragraphs.get(active_index) else {
+            let previous_viewport_y = ui.get_reader_viewport_y();
+            let presentation_model = ui.get_paragraphs();
+            let paragraph_model = presentation_model
+                .as_any()
+                .downcast_ref::<ReaderParagraphModel>();
+            let Some(paragraph) = paragraph_model
+                .and_then(|model| model.presented_paragraph(active_index))
+                .cloned()
+                .or_else(|| document.paragraph_at(active_index))
+            else {
                 return;
             };
             let block_id = paragraph.block_id.clone();
             let chapter_key =
                 ChapterKey::new(format!("{}:{}", document.kind(), paragraph.chapter_index));
-            let anchor = viewport_anchors
+            let mut anchor = viewport_anchors
                 .borrow()
                 .capture(
                     chapter_key.clone(),
@@ -1505,28 +1720,157 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .unwrap_or(ViewAnchor {
                     chapter_key,
-                    block_id,
+                    block_id: block_id.clone(),
                     character_offset_utf16: 0,
                     pixel_offset_from_viewport_top: 0.0,
                 });
+            let first_presented_block_id = first_presented_block_id(&ui);
             if enabled {
-                if let Err(error) = session.begin_edit(anchor) {
+                if let Err(error) = session.begin_edit(anchor.clone()) {
                     ui.set_status_text(error.into());
                     return;
                 }
+                let mut target = active_index;
+                let mut preferred_start = ui.get_reader_window_start().max(0) as usize;
                 if let Some(edit) = session.edit_session() {
-                    viewport_anchors
-                        .borrow_mut()
-                        .set_blocks(edit.borrow().draft().blocks());
+                    let edit_ref = edit.borrow();
+                    let draft_blocks = edit_ref.draft().blocks();
+                    (target, preferred_start) = match &document {
+                        OpenDocument::Txt(reading) => (
+                            remap_reading_to_edit(
+                                reading.paragraphs(),
+                                draft_blocks,
+                                active_index,
+                                active_index,
+                            ),
+                            remap_reading_to_edit(
+                                reading.paragraphs(),
+                                draft_blocks,
+                                ui.get_reader_window_start().max(0) as usize,
+                                preferred_start,
+                            ),
+                        ),
+                        OpenDocument::Epub(reading) => {
+                            let reading = reading.paragraphs();
+                            (
+                                remap_reading_to_edit(
+                                    reading.as_ref(),
+                                    draft_blocks,
+                                    active_index,
+                                    active_index,
+                                ),
+                                remap_reading_to_edit(
+                                    reading.as_ref(),
+                                    draft_blocks,
+                                    ui.get_reader_window_start().max(0) as usize,
+                                    preferred_start,
+                                ),
+                            )
+                        }
+                    };
+                    let mapped_anchor = draft_blocks
+                        .get(target)
+                        .map(|block| (block.id.clone(), block.chapter_key.clone()));
+                    drop(edit_ref);
+                    if let Some((block_id, chapter_key)) = mapped_anchor {
+                        anchor.block_id = block_id;
+                        anchor.chapter_key = chapter_key;
+                        session.set_anchor(anchor.clone());
+                    }
                 }
-                set_reader_models(&ui, document, active_index, session.edit_session());
+                ui.set_view_anchor_restore_pending(true);
+                set_reader_models_with_preferred_start(
+                    &ui,
+                    document,
+                    target,
+                    Some(preferred_start),
+                    session.edit_session(),
+                );
+                viewport_anchors.borrow_mut().clear();
+                ui.set_reader_viewport_y(previous_viewport_y);
+                ui.set_active_paragraph_index(as_i32(target));
                 ui.set_edit_mode(true);
                 ui.set_edit_dirty(session.is_dirty());
                 update_edit_history_state(&ui, &session);
                 ui.set_status_text("内联编辑已启用；背景、图片和当前阅读画布保持挂载。".into());
             } else {
+                let (draft_anchor_index, draft_first_index) = session
+                    .edit_session()
+                    .map(|edit| {
+                        let edit = edit.borrow();
+                        let blocks = edit.draft().blocks();
+                        let anchor_index = blocks
+                            .iter()
+                            .position(|block| block.id == anchor.block_id)
+                            .unwrap_or(active_index.min(blocks.len().saturating_sub(1)));
+                        let first_index = first_presented_block_id
+                            .as_ref()
+                            .and_then(|block_id| {
+                                blocks.iter().position(|block| &block.id == block_id)
+                            })
+                            .unwrap_or(ui.get_reader_window_start().max(0) as usize);
+                        (anchor_index, first_index)
+                    })
+                    .unwrap_or_default();
+                let (target, preferred_start) = session
+                    .edit_session()
+                    .map(|edit| {
+                        let edit = edit.borrow();
+                        let blocks = edit.draft().blocks();
+                        match &document {
+                            OpenDocument::Txt(reading) => (
+                                remap_edit_to_reading(
+                                    blocks,
+                                    reading.paragraphs(),
+                                    draft_anchor_index,
+                                    active_index,
+                                ),
+                                remap_edit_to_reading(
+                                    blocks,
+                                    reading.paragraphs(),
+                                    draft_first_index,
+                                    ui.get_reader_window_start().max(0) as usize,
+                                ),
+                            ),
+                            OpenDocument::Epub(reading) => {
+                                let reading = reading.paragraphs();
+                                (
+                                    remap_edit_to_reading(
+                                        blocks,
+                                        reading.as_ref(),
+                                        draft_anchor_index,
+                                        active_index,
+                                    ),
+                                    remap_edit_to_reading(
+                                        blocks,
+                                        reading.as_ref(),
+                                        draft_first_index,
+                                        ui.get_reader_window_start().max(0) as usize,
+                                    ),
+                                )
+                            }
+                        }
+                    })
+                    .unwrap_or((active_index, ui.get_reader_window_start().max(0) as usize));
                 session.cancel_edit();
-                set_reader_models(&ui, document, active_index, None);
+                let document = session.presentation_document();
+                if let Some(paragraph) = document.paragraph_at(target) {
+                    anchor.block_id = paragraph.block_id.clone();
+                    anchor.chapter_key =
+                        ChapterKey::new(format!("{}:{}", document.kind(), paragraph.chapter_index));
+                    session.set_anchor(anchor.clone());
+                }
+                ui.set_view_anchor_restore_pending(true);
+                set_reader_models_with_preferred_start(
+                    &ui,
+                    document,
+                    target,
+                    Some(preferred_start),
+                    None,
+                );
+                viewport_anchors.borrow_mut().clear();
+                ui.set_reader_viewport_y(previous_viewport_y);
+                ui.set_active_paragraph_index(as_i32(target));
                 ui.set_edit_mode(false);
                 ui.set_edit_dirty(false);
                 ui.set_edit_can_undo(false);
@@ -1540,6 +1884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
         ui.on_replace_block_text(move |block_id, text, caret_byte| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1549,18 +1894,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let block_id = BlockId::new(block_id.as_str());
             let caret_utf16 = utf16_offset_for_byte(text.as_str(), caret_byte.max(0) as usize);
-            match session.replace_block_text(&block_id, text.as_str().to_owned(), caret_utf16) {
-                Ok(changed) => {
-                    if changed {
+            match session.apply_edit(EditCommand::ReplaceText {
+                block_id,
+                text: text.as_str().to_owned(),
+                caret_utf16,
+            }) {
+                Ok(change) => {
+                    if change.structure_changed() {
+                        refresh_after_structural_edit(
+                            &ui,
+                            &session,
+                            &viewport_anchors,
+                            change.affected_block_id(),
+                            "已创建独立段落；可在段落边界继续使用 Backspace/Delete 合并。",
+                        );
+                    } else if change.changed() {
                         ui.set_edit_dirty(true);
                         update_edit_history_state(&ui, &session);
-                        ui.set_status_text(
-                            "草稿已更新 · Enter 为块内换行，暂不支持跨段合并。".into(),
-                        );
+                        ui.set_status_text("草稿已更新。".into());
                         schedule_geometry_measurement(&ui);
                     }
                 }
                 Err(error) => ui.set_status_text(error.to_string().into()),
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_join_adjacent_text(move |block_id, direction, text, caret_byte, anchor_byte| {
+            let Some(ui) = weak.upgrade() else {
+                return false;
+            };
+            if caret_byte < 0 || caret_byte != anchor_byte {
+                return false;
+            }
+            let direction = match direction.as_str() {
+                "previous" if caret_byte == 0 => JoinDirection::Previous,
+                "next" if caret_byte as usize == text.as_str().len() => JoinDirection::Next,
+                _ => return false,
+            };
+            let Some(session) = workspace.active_session() else {
+                return false;
+            };
+            let block_id = BlockId::new(block_id.as_str());
+            let Some(block) = session
+                .edit_session()
+                .and_then(|edit| edit.borrow().draft().block(&block_id).cloned())
+            else {
+                return false;
+            };
+            if block.text != text.as_str() {
+                return false;
+            }
+            let pixel_offset = session
+                .anchor()
+                .map_or(0.0, |anchor| anchor.pixel_offset_from_viewport_top);
+            session.set_anchor(ViewAnchor {
+                chapter_key: block.chapter_key,
+                block_id: block_id.clone(),
+                character_offset_utf16: utf16_offset_for_byte(text.as_str(), caret_byte as usize),
+                pixel_offset_from_viewport_top: pixel_offset,
+            });
+            match session.apply_edit(EditCommand::JoinAdjacentText {
+                block_id,
+                direction,
+            }) {
+                Ok(change) => {
+                    refresh_after_structural_edit(
+                        &ui,
+                        &session,
+                        &viewport_anchors,
+                        change.affected_block_id(),
+                        "段落边界已删除，相邻正文已合并。",
+                    );
+                    true
+                }
+                Err(error) => {
+                    ui.set_status_text(error.to_string().into());
+                    false
+                }
             }
         });
     }
@@ -1580,6 +1995,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let viewport_anchors = viewport_anchors.clone();
         ui.on_redo_edit(move || {
             apply_edit_history_step(&weak, &workspace, &viewport_anchors, false);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let sender = epub_image_import_sender.clone();
+        let active_request = active_epub_image_import_request.clone();
+        ui.on_insert_epub_image(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let Some(edit) = session.edit_session() else {
+                return;
+            };
+            if !matches!(edit.borrow().draft(), DocumentDraft::Epub(_)) {
+                ui.set_status_text("只有 EPUB 草稿支持插入图片。".into());
+                return;
+            }
+            let Some(anchor_block_id) = active_presented_block_id(&ui).or_else(|| {
+                session
+                    .edit_session()
+                    .map(|edit| edit.borrow().anchor().block_id.clone())
+            }) else {
+                ui.set_status_text("当前没有可用的图片插入锚点。".into());
+                return;
+            };
+            let Some(source_path) = rfd::FileDialog::new()
+                .add_filter("EPUB 图片", &["png", "jpg", "jpeg", "gif", "webp"])
+                .pick_file()
+            else {
+                return;
+            };
+            let request_id = active_request.get().wrapping_add(1).max(1);
+            let alt_text = source_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("插图")
+                .to_owned();
+            let request = EpubImageImportRequest {
+                request_id,
+                document_path: session.path(),
+                revision: edit.borrow().revision(),
+                anchor_block_id,
+                side: InsertSide::After,
+                alt_text,
+                source_path,
+            };
+            if sender.try_send(request).is_ok() {
+                active_request.set(request_id);
+                ui.set_status_text("正在后台校验并解码图片…".into());
+            } else {
+                ui.set_status_text("图片导入队列正忙，请稍后重试。".into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        let viewport_anchors = viewport_anchors.clone();
+        ui.on_remove_epub_image(move |block_id| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let block_id = BlockId::new(block_id.as_str());
+            set_session_anchor_to_block(&session, &block_id);
+            match session.apply_edit(EditCommand::RemoveEpubImage {
+                block_id: block_id.clone(),
+            }) {
+                Ok(change) => refresh_after_structural_edit(
+                    &ui,
+                    &session,
+                    &viewport_anchors,
+                    change.affected_block_id(),
+                    "图片引用已从草稿删除；共享资源会在保存时安全保留。",
+                ),
+                Err(error) => ui.set_status_text(error.to_string().into()),
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let workspace = workspace.clone();
+        ui.on_set_epub_image_alt(move |block_id, alt_text| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(session) = workspace.active_session() else {
+                return;
+            };
+            let block_id = BlockId::new(block_id.as_str());
+            set_session_anchor_to_block(&session, &block_id);
+            match session.apply_edit(EditCommand::SetEpubImageAlt {
+                block_id,
+                alt_text: alt_text.as_str().to_owned(),
+            }) {
+                Ok(change) if change.changed() => {
+                    ui.set_edit_dirty(session.is_dirty());
+                    update_edit_history_state(&ui, &session);
+                    ui.set_status_text("图片替代文本已更新到草稿。".into());
+                }
+                Ok(_) => {}
+                Err(error) => ui.set_status_text(error.to_string().into()),
+            }
         });
     }
 
@@ -1712,7 +2239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let document = session.document();
                     let index = ui.get_active_paragraph_index().max(0) as usize;
-                    set_reader_models(&ui, document, index, None);
+                    ui.set_view_anchor_restore_pending(true);
+                    set_reader_models_preserving_window(&ui, document, index, None);
                     ui.set_edit_mode(false);
                     ui.set_edit_dirty(false);
                     ui.set_edit_can_undo(false);
@@ -2496,33 +3024,82 @@ fn restore_view_anchor_after_layout(
     session: &Rc<document_workspace::DocumentSession>,
     controller: &Rc<RefCell<ViewportAnchorController>>,
 ) {
-    let weak = ui.as_weak();
-    let session = session.clone();
-    let controller = controller.clone();
-    Timer::single_shot(Duration::from_millis(1), move || {
+    let Some(viewport_anchor) = session.anchor() else {
+        ui.set_view_anchor_restore_pending(false);
+        return;
+    };
+    restore_view_anchor_after_layout_with_viewport(ui, session, controller, viewport_anchor);
+}
+
+fn restore_view_anchor_after_layout_with_viewport(
+    ui: &MainWindow,
+    session: &Rc<document_workspace::DocumentSession>,
+    controller: &Rc<RefCell<ViewportAnchorController>>,
+    viewport_anchor: ViewAnchor,
+) {
+    let Some(anchor) = session.anchor() else {
+        ui.set_view_anchor_restore_pending(false);
+        return;
+    };
+    ui.set_view_anchor_restore_pending(true);
+    schedule_view_anchor_restore(
+        ui.as_weak(),
+        session.clone(),
+        controller.clone(),
+        viewport_anchor,
+        anchor,
+        2,
+    );
+}
+
+fn schedule_view_anchor_restore(
+    weak: slint::Weak<MainWindow>,
+    session: Rc<document_workspace::DocumentSession>,
+    controller: Rc<RefCell<ViewportAnchorController>>,
+    viewport_anchor: ViewAnchor,
+    anchor: ViewAnchor,
+    retries: u8,
+) {
+    Timer::single_shot(Duration::from_millis(16), move || {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let Some(anchor) = session.anchor() else {
+        let Some(viewport_y) = controller.borrow().viewport_y_for(&viewport_anchor) else {
+            if retries > 0 {
+                schedule_geometry_measurement(&ui);
+                schedule_view_anchor_restore(
+                    ui.as_weak(),
+                    session,
+                    controller,
+                    viewport_anchor,
+                    anchor,
+                    retries.saturating_sub(1),
+                );
+            } else {
+                ui.set_view_anchor_restore_pending(false);
+            }
             return;
         };
-        if let Some(viewport_y) = controller.borrow().viewport_y_for(&anchor) {
-            ui.set_reader_viewport_y(viewport_y);
-            ui.set_edit_anchor_block_id(anchor.block_id.as_str().into());
-            ui.set_edit_caret_utf16(as_i32(anchor.character_offset_utf16));
-            let caret_byte = session
-                .edit_session()
-                .and_then(|edit| {
-                    let edit = edit.borrow();
-                    edit.draft().block(&anchor.block_id).map(|block| {
-                        byte_offset_for_utf16(&block.text, anchor.character_offset_utf16)
-                    })
-                })
-                .unwrap_or_default();
-            ui.set_edit_caret_byte(as_i32(caret_byte));
-            ui.set_edit_anchor_pixel_offset(anchor.pixel_offset_from_viewport_top);
-            ui.set_edit_restore_generation(ui.get_edit_restore_generation().wrapping_add(1));
+        session.set_anchor(anchor.clone());
+        ui.set_reader_viewport_y(viewport_y);
+        ui.set_edit_anchor_block_id(anchor.block_id.as_str().into());
+        ui.set_edit_caret_utf16(as_i32(anchor.character_offset_utf16));
+        let caret_byte = session
+            .edit_session()
+            .and_then(|edit| {
+                let edit = edit.borrow();
+                edit.draft()
+                    .block(&anchor.block_id)
+                    .map(|block| byte_offset_for_utf16(&block.text, anchor.character_offset_utf16))
+            })
+            .unwrap_or_default();
+        ui.set_edit_caret_byte(as_i32(caret_byte));
+        ui.set_edit_anchor_pixel_offset(anchor.pixel_offset_from_viewport_top);
+        ui.set_edit_restore_generation(ui.get_edit_restore_generation().wrapping_add(1));
+        if let Some(index) = presented_block_index(&ui, &anchor.block_id) {
+            ui.set_active_paragraph_index(as_i32(index));
         }
+        ui.set_view_anchor_restore_pending(false);
     });
 }
 
@@ -2543,6 +3120,311 @@ fn update_edit_history_state(ui: &MainWindow, session: &Rc<document_workspace::D
     ui.set_edit_can_redo(state.as_ref().is_some_and(|edit| edit.borrow().can_redo()));
 }
 
+fn active_presented_block_id(ui: &MainWindow) -> Option<BlockId> {
+    let index = ui.get_active_paragraph_index().max(0) as usize;
+    ui.get_paragraphs()
+        .as_any()
+        .downcast_ref::<ReaderParagraphModel>()
+        .and_then(|model| model.presented_paragraph(index))
+        .map(|paragraph| paragraph.block_id.clone())
+}
+
+fn presented_block_index(ui: &MainWindow, block_id: &BlockId) -> Option<usize> {
+    let presentation_model = ui.get_paragraphs();
+    let model = presentation_model
+        .as_any()
+        .downcast_ref::<ReaderParagraphModel>()?;
+    model
+        .window_paragraphs()
+        .iter()
+        .position(|paragraph| paragraph.block_id == *block_id)
+        .map(|offset| model.range.start + offset)
+}
+
+fn first_presented_block_id(ui: &MainWindow) -> Option<BlockId> {
+    ui.get_paragraphs()
+        .as_any()
+        .downcast_ref::<ReaderParagraphModel>()
+        .and_then(|model| model.window_paragraphs().first())
+        .map(|paragraph| paragraph.block_id.clone())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockSignature {
+    kind: ParagraphKind,
+    text: String,
+}
+
+trait HasBlockId {
+    fn block_id(&self) -> &BlockId;
+}
+
+impl HasBlockId for ReadingParagraph {
+    fn block_id(&self) -> &BlockId {
+        &self.block_id
+    }
+}
+
+impl HasBlockId for EditableBlock {
+    fn block_id(&self) -> &BlockId {
+        &self.id
+    }
+}
+
+fn reading_block_signatures(paragraphs: &[ReadingParagraph]) -> Vec<BlockSignature> {
+    paragraphs
+        .iter()
+        .map(|paragraph| BlockSignature {
+            kind: paragraph.kind,
+            text: paragraph.text.clone(),
+        })
+        .collect()
+}
+
+fn editable_block_signatures(blocks: &[EditableBlock]) -> Vec<BlockSignature> {
+    blocks
+        .iter()
+        .map(|block| BlockSignature {
+            kind: block.kind,
+            text: block.text.clone(),
+        })
+        .collect()
+}
+
+fn remap_block_index_by_stable_id<S: HasBlockId, T: HasBlockId>(
+    source: &[S],
+    target: &[T],
+    source_index: usize,
+    fallback: usize,
+) -> Option<usize> {
+    if source.is_empty() || target.is_empty() {
+        return None;
+    }
+    let source_index = source_index.min(source.len() - 1);
+    let expected = fallback.min(target.len() - 1);
+    let target_indices = target
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.block_id(), index))
+        .collect::<HashMap<_, _>>();
+    for radius in 0..source.len() {
+        let mut best = None;
+        for neighbor_index in [
+            source_index.checked_sub(radius),
+            (radius > 0)
+                .then(|| source_index.saturating_add(radius))
+                .filter(|index| *index < source.len()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(target_neighbor_index) = target_indices.get(source[neighbor_index].block_id())
+            else {
+                continue;
+            };
+            let inferred =
+                *target_neighbor_index as isize + source_index as isize - neighbor_index as isize;
+            let inferred = inferred.clamp(0, target.len() as isize - 1) as usize;
+            let distance = inferred.abs_diff(expected);
+            if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+                best = Some((inferred, distance));
+            }
+        }
+        if let Some((index, _)) = best {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn remap_reading_to_edit(
+    reading: &[ReadingParagraph],
+    draft: &[EditableBlock],
+    reading_index: usize,
+    fallback: usize,
+) -> usize {
+    remap_block_index_by_stable_id(reading, draft, reading_index, fallback).unwrap_or_else(|| {
+        remap_block_index_by_content(
+            &reading_block_signatures(reading),
+            &editable_block_signatures(draft),
+            reading_index,
+            fallback,
+        )
+    })
+}
+
+fn remap_edit_to_reading(
+    draft: &[EditableBlock],
+    reading: &[ReadingParagraph],
+    draft_index: usize,
+    fallback: usize,
+) -> usize {
+    remap_block_index_by_stable_id(draft, reading, draft_index, fallback).unwrap_or_else(|| {
+        remap_block_index_by_content(
+            &editable_block_signatures(draft),
+            &reading_block_signatures(reading),
+            draft_index,
+            fallback,
+        )
+    })
+}
+
+fn remap_block_index_by_content(
+    source: &[BlockSignature],
+    target: &[BlockSignature],
+    source_index: usize,
+    fallback: usize,
+) -> usize {
+    if target.is_empty() {
+        return 0;
+    }
+    if source.is_empty() {
+        return fallback.min(target.len() - 1);
+    }
+    let source_index = source_index.min(source.len() - 1);
+    let expected = fallback.min(target.len() - 1);
+    for radius in 0..source.len() {
+        let mut source_candidates = Vec::with_capacity(2);
+        if let Some(index) = source_index.checked_sub(radius) {
+            source_candidates.push(index);
+        }
+        let after = source_index.saturating_add(radius);
+        if radius > 0 && after < source.len() {
+            source_candidates.push(after);
+        }
+        let mut best = None;
+        for neighbor_index in source_candidates {
+            for (target_neighbor_index, target_signature) in target.iter().enumerate() {
+                if target_signature != &source[neighbor_index] {
+                    continue;
+                }
+                let inferred = target_neighbor_index as isize + source_index as isize
+                    - neighbor_index as isize;
+                let inferred = inferred.clamp(0, target.len() as isize - 1) as usize;
+                let distance = inferred.abs_diff(expected);
+                if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+                    best = Some((inferred, distance));
+                }
+            }
+        }
+        if let Some((index, _)) = best {
+            return index;
+        }
+    }
+    expected
+}
+
+fn remap_block_index<'a>(
+    first_presented_block_id: Option<&BlockId>,
+    updated_block_ids: impl IntoIterator<Item = &'a BlockId>,
+    fallback: usize,
+) -> usize {
+    let Some(first_presented_block_id) = first_presented_block_id else {
+        return fallback;
+    };
+    updated_block_ids
+        .into_iter()
+        .position(|block_id| block_id == first_presented_block_id)
+        .unwrap_or(fallback)
+}
+
+fn set_session_anchor_to_block(
+    session: &Rc<document_workspace::DocumentSession>,
+    block_id: &BlockId,
+) {
+    let Some(edit) = session.edit_session() else {
+        return;
+    };
+    let Some(block) = edit.borrow().draft().block(block_id).cloned() else {
+        return;
+    };
+    let pixel_offset = session
+        .anchor()
+        .map_or(0.0, |anchor| anchor.pixel_offset_from_viewport_top);
+    session.set_anchor(ViewAnchor {
+        chapter_key: block.chapter_key,
+        block_id: block.id,
+        character_offset_utf16: 0,
+        pixel_offset_from_viewport_top: pixel_offset,
+    });
+}
+
+fn refresh_after_structural_edit(
+    ui: &MainWindow,
+    session: &Rc<document_workspace::DocumentSession>,
+    viewport_anchors: &Rc<RefCell<ViewportAnchorController>>,
+    affected_block_id: &BlockId,
+    status: &str,
+) {
+    let previous_viewport_y = ui.get_reader_viewport_y();
+    let mut viewport_anchor = session.anchor().and_then(|focus_anchor| {
+        viewport_anchors.borrow().capture(
+            focus_anchor.chapter_key,
+            None,
+            focus_anchor.character_offset_utf16,
+            previous_viewport_y,
+        )
+    });
+    let Some(edit) = session.edit_session() else {
+        return;
+    };
+    let edit_ref = edit.borrow();
+    let target_block_id = edit_ref
+        .draft()
+        .block(affected_block_id)
+        .map(|block| block.id.clone())
+        .unwrap_or_else(|| edit_ref.anchor().block_id.clone());
+    let target = edit_ref
+        .draft()
+        .blocks()
+        .iter()
+        .position(|block| block.id == target_block_id)
+        .unwrap_or(0);
+    let first_presented_block_id = first_presented_block_id(ui);
+    let preferred_start = remap_block_index(
+        first_presented_block_id.as_ref(),
+        edit_ref.draft().blocks().iter().map(|block| &block.id),
+        ui.get_reader_window_start().max(0) as usize,
+    );
+    if let Some(viewport_anchor) = viewport_anchor.as_mut() {
+        let viewport_index = edit_ref
+            .draft()
+            .blocks()
+            .iter()
+            .position(|block| block.id == viewport_anchor.block_id)
+            .unwrap_or(preferred_start);
+        if let Some(block) = edit_ref.draft().blocks().get(viewport_index) {
+            viewport_anchor.block_id = block.id.clone();
+            viewport_anchor.chapter_key = block.chapter_key.clone();
+        }
+    }
+    drop(edit_ref);
+    ui.set_view_anchor_restore_pending(true);
+    set_reader_models_with_preferred_start(
+        ui,
+        session.presentation_document(),
+        target,
+        Some(preferred_start),
+        session.edit_session(),
+    );
+    viewport_anchors.borrow_mut().clear();
+    ui.set_reader_viewport_y(previous_viewport_y);
+    ui.set_active_paragraph_index(as_i32(target));
+    ui.set_edit_dirty(session.is_dirty());
+    update_edit_history_state(ui, session);
+    ui.set_status_text(status.into());
+    if let Some(viewport_anchor) = viewport_anchor {
+        restore_view_anchor_after_layout_with_viewport(
+            ui,
+            session,
+            viewport_anchors,
+            viewport_anchor,
+        );
+    } else {
+        restore_view_anchor_after_layout(ui, session, viewport_anchors);
+    }
+}
+
 fn apply_edit_history_step(
     weak: &slint::Weak<MainWindow>,
     workspace: &DocumentWorkspace,
@@ -2558,14 +3440,35 @@ fn apply_edit_history_step(
     let result = if undo { session.undo() } else { session.redo() };
     match result {
         Ok(true) => {
-            let index = ui.get_active_paragraph_index().max(0) as usize;
-            set_reader_models(
+            let mut index = ui.get_active_paragraph_index().max(0) as usize;
+            let previous_viewport_y = ui.get_reader_viewport_y();
+            let first_presented_block_id = first_presented_block_id(&ui);
+            let mut preferred_start = ui.get_reader_window_start().max(0) as usize;
+            if let Some(edit) = session.edit_session() {
+                let edit = edit.borrow();
+                preferred_start = remap_block_index(
+                    first_presented_block_id.as_ref(),
+                    edit.draft().blocks().iter().map(|block| &block.id),
+                    preferred_start,
+                );
+                index = edit
+                    .draft()
+                    .blocks()
+                    .iter()
+                    .position(|block| block.id == edit.anchor().block_id)
+                    .unwrap_or(index);
+            }
+            ui.set_view_anchor_restore_pending(true);
+            set_reader_models_with_preferred_start(
                 &ui,
                 session.presentation_document(),
                 index,
+                Some(preferred_start),
                 session.edit_session(),
             );
-            ui.set_edit_dirty(true);
+            viewport_anchors.borrow_mut().clear();
+            ui.set_reader_viewport_y(previous_viewport_y);
+            ui.set_edit_dirty(session.is_dirty());
             update_edit_history_state(&ui, &session);
             ui.set_status_text(if undo { "已撤销。" } else { "已重做。" }.into());
             restore_view_anchor_after_layout(&ui, &session, viewport_anchors);
@@ -2671,7 +3574,7 @@ fn activate_open_document(
         ui.set_edit_dirty(session.is_dirty());
         update_edit_history_state(ui, &session);
         if session.editing() {
-            set_reader_models(
+            set_reader_models_preserving_window(
                 ui,
                 session.presentation_document(),
                 initial_index,
@@ -2904,21 +3807,50 @@ fn paragraph_kind_name(kind: ParagraphKind) -> SharedString {
     .into()
 }
 
+fn txt_chapter_index(chapter_key: &ChapterKey) -> usize {
+    chapter_key
+        .as_str()
+        .strip_prefix("txt:")
+        .and_then(|index| index.parse().ok())
+        .unwrap_or(0)
+}
+
 fn set_reader_models(
     ui: &MainWindow,
     document: OpenDocument,
     target: usize,
     edit: Option<Rc<RefCell<EditSession>>>,
 ) {
-    let paragraph_count = match &document {
-        OpenDocument::Txt(document) => document.paragraphs().len(),
-        OpenDocument::Epub(document) => document.paragraphs().len(),
-    };
-    let start = target.min(paragraph_count.saturating_sub(1));
-    let end = start
-        .saturating_add(READER_WINDOW_SIZE)
-        .min(paragraph_count);
-    let paragraph_model = ReaderParagraphModel::new_with_edit(document, start..end, edit);
+    set_reader_models_with_preferred_start(ui, document, target, None, edit);
+}
+
+fn set_reader_models_preserving_window(
+    ui: &MainWindow,
+    document: OpenDocument,
+    target: usize,
+    edit: Option<Rc<RefCell<EditSession>>>,
+) {
+    let preferred_start = ui.get_reader_window_start().max(0) as usize;
+    set_reader_models_with_preferred_start(ui, document, target, Some(preferred_start), edit);
+}
+
+fn set_reader_models_with_preferred_start(
+    ui: &MainWindow,
+    document: OpenDocument,
+    target: usize,
+    preferred_start: Option<usize>,
+    edit: Option<Rc<RefCell<EditSession>>>,
+) {
+    let paragraph_count = edit.as_ref().map_or_else(
+        || match &document {
+            OpenDocument::Txt(document) => document.paragraphs().len(),
+            OpenDocument::Epub(document) => document.paragraphs().len(),
+        },
+        |edit| edit.borrow().draft().blocks().len(),
+    );
+    let range = reader_window_range(paragraph_count, target, preferred_start);
+    let start = range.start;
+    let paragraph_model = ReaderParagraphModel::new_with_edit(document, range, edit);
     let rows = paragraph_model.paragraph_rows();
     let paragraphs = ModelRc::new(paragraph_model);
     let paragraph_rows = ModelRc::new(ReaderParagraphRowModel {
@@ -2932,6 +3864,61 @@ fn set_reader_models(
     ui.set_paragraphs(paragraphs);
     ui.set_paragraph_rows(paragraph_rows);
     schedule_geometry_measurement(ui);
+}
+
+fn reader_window_range(
+    paragraph_count: usize,
+    target: usize,
+    preferred_start: Option<usize>,
+) -> Range<usize> {
+    if paragraph_count == 0 {
+        return 0..0;
+    }
+    let target = target.min(paragraph_count - 1);
+    let maximum_start = paragraph_count.saturating_sub(READER_WINDOW_SIZE);
+    let centered_start = target
+        .saturating_sub(READER_WINDOW_SIZE / 2)
+        .min(maximum_start);
+    let start = preferred_start
+        .map(|start| start.min(maximum_start))
+        .filter(|start| {
+            target >= *start
+                && target
+                    < start
+                        .saturating_add(READER_WINDOW_SIZE)
+                        .min(paragraph_count)
+        })
+        .unwrap_or(centered_start);
+    let end = start
+        .saturating_add(READER_WINDOW_SIZE)
+        .min(paragraph_count);
+    start..end
+}
+
+fn reader_window_shift_start(
+    range: Range<usize>,
+    paragraph_count: usize,
+    visible_index: usize,
+    moving_forward: bool,
+) -> Option<usize> {
+    let edge_margin = READER_WINDOW_SIZE / 8;
+    let shift = READER_WINDOW_SIZE / 2;
+    let maximum_start = paragraph_count.saturating_sub(READER_WINDOW_SIZE);
+    if moving_forward
+        && range.end < paragraph_count
+        && visible_index.saturating_add(edge_margin) >= range.end
+    {
+        let start = range.start.saturating_add(shift).min(maximum_start);
+        return (start > range.start).then_some(start);
+    }
+    if !moving_forward
+        && range.start > 0
+        && visible_index <= range.start.saturating_add(edge_margin)
+    {
+        let start = range.start.saturating_sub(shift);
+        return (start < range.start).then_some(start);
+    }
+    None
 }
 
 fn update_reader_target_row(ui: &MainWindow, paragraph_index: usize) {
@@ -3803,6 +4790,196 @@ mod tests {
     }
 
     #[test]
+    fn image_rows_keep_the_same_height_when_edit_mode_changes() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(!source.contains("root.edit-mode ? 352px : 300px"));
+        assert_eq!(
+            source.matches("? 352px").count(),
+            2,
+            "single- and double-column image rows must keep stable geometry"
+        );
+    }
+
+    #[test]
+    fn inline_editors_receive_pointer_input_in_edit_mode() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let single_column = source
+            .split("if root.settings-reading-columns == 1 : reader-list := ScrollView")
+            .nth(1)
+            .expect("single-column reader")
+            .split("if root.settings-reading-columns == 2 : double-reader-list := ScrollView")
+            .next()
+            .expect("single-column reader body");
+        let double_column = source
+            .split("if root.settings-reading-columns == 2 : double-reader-list := ScrollView")
+            .nth(1)
+            .expect("double-column reader");
+
+        assert!(
+            single_column.contains(
+                "TouchArea {\n                                        enabled: !root.edit-mode;"
+            ),
+            "the single-column row hit target must not cover its TextInput while editing"
+        );
+        assert_eq!(
+            double_column.matches("enabled: !root.edit-mode;").count(),
+            2,
+            "both double-column row hit targets must release pointer input while editing"
+        );
+    }
+
+    #[test]
+    fn paragraph_editor_live_measurement_drives_single_and_double_column_row_height() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("property <string> live-edit-text:"));
+        assert!(source.contains("property <string> first-live-edit-text:"));
+        assert!(source.contains("property <string> second-live-edit-text:"));
+        assert_eq!(
+            source.matches("editor-measure := Text").count(),
+            3,
+            "every editor needs an independent hidden wrapping measurement"
+        );
+        assert!(source.contains("text <=> row.live-edit-text"));
+        assert!(source.contains("text <=> pair-row.first-live-edit-text"));
+        assert!(source.contains("text <=> pair-row.second-live-edit-text"));
+        assert!(
+            source.contains("Math.max(self.live-editor-height, paragraph-body.preferred-height)")
+        );
+        assert!(
+            source.contains("Math.max(self.first-live-editor-height, first-body.preferred-height)")
+        );
+        assert!(
+            source
+                .contains("Math.max(self.second-live-editor-height, second-body.preferred-height)")
+        );
+        assert!(!source.contains(
+            "height: Math.max(paragraph-body.preferred-height, parent.height - self.y - 13px)"
+        ));
+        assert!(!source.contains("height: parent.height - 26px"));
+    }
+
+    #[test]
+    fn existing_blank_rows_keep_their_reading_geometry_in_edit_mode() {
+        let source = include_str!("../../../ui/readloom.slint");
+        let single = source
+            .split("for paragraph in root.paragraphs : row := Rectangle")
+            .nth(1)
+            .expect("single-column row")
+            .split("background: paragraph.index")
+            .next()
+            .expect("single-column height binding");
+        let double = source
+            .split("for pair in root.paragraph-rows : pair-row := Rectangle")
+            .nth(1)
+            .expect("double-column row")
+            .split("background: pair.first.index")
+            .next()
+            .expect("double-column height binding");
+
+        assert!(
+            single.find(": paragraph.kind == \"blank\"").unwrap()
+                < single
+                    .find(": root.edit-mode && paragraph.editable")
+                    .unwrap()
+        );
+        assert!(
+            double.find(": pair.first.kind == \"blank\"").unwrap()
+                < double
+                    .find(": root.edit-mode && (pair.first.editable")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_heading_rows_keep_their_reading_height_as_the_editor_minimum() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert_eq!(
+            source
+                .matches("Math.max(76px + root.settings-paragraph-spacing * root.settings-font-size * 1px,")
+                .count(),
+            2,
+            "single- and double-column heading editors must not shrink their reading rows"
+        );
+    }
+
+    #[test]
+    fn paragraph_structure_commands_refresh_the_bounded_model_with_boundary_guards() {
+        let ui_source = include_str!("../../../ui/readloom.slint");
+        let rust_source = include_str!("main.rs");
+        let replace_callback = rust_source
+            .split("ui.on_replace_block_text")
+            .nth(1)
+            .expect("replace callback")
+            .split("ui.on_join_adjacent_text")
+            .next()
+            .expect("replace callback body");
+
+        assert!(
+            ui_source
+                .contains("callback join-adjacent-text(string, string, string, int, int) -> bool;")
+        );
+        assert_eq!(ui_source.matches("key-pressed(event) =>").count(), 3);
+        assert_eq!(ui_source.matches("self.preedit-text.is-empty").count(), 3);
+        assert_eq!(
+            ui_source
+                .matches("self.cursor-position-byte-offset == self.anchor-position-byte-offset")
+                .count(),
+            3
+        );
+        assert!(replace_callback.contains("EditCommand::ReplaceText"));
+        assert!(replace_callback.contains("change.structure_changed()"));
+        assert!(replace_callback.contains("refresh_after_structural_edit"));
+        assert!(rust_source.contains("EditCommand::JoinAdjacentText"));
+    }
+
+    #[test]
+    fn undo_history_refreshes_dirty_from_the_session_state() {
+        let source = include_str!("main.rs");
+        let history_step = source
+            .split("fn apply_edit_history_step(")
+            .nth(1)
+            .expect("history step")
+            .split("fn continue_dirty_action(")
+            .next()
+            .expect("history step body");
+
+        assert!(history_step.contains("ui.set_edit_dirty(session.is_dirty());"));
+        assert!(!history_step.contains("ui.set_edit_dirty(true);"));
+    }
+
+    #[test]
+    fn leaving_edit_mode_uses_the_post_save_presentation_snapshot() {
+        let source = include_str!("main.rs");
+        let edit_mode_callback = source
+            .split("ui.on_request_edit_mode")
+            .nth(1)
+            .expect("edit mode callback")
+            .split("ui.on_replace_block_text")
+            .next()
+            .expect("edit mode callback body");
+
+        let cancel_branch = edit_mode_callback
+            .split("session.cancel_edit();")
+            .nth(1)
+            .expect("cancel edit branch");
+        assert!(
+            cancel_branch
+                .starts_with("\n                let document = session.presentation_document();")
+        );
+        assert!(cancel_branch.contains(
+            "set_reader_models_with_preferred_start(\n                    &ui,\n                    document,"
+        ));
+        assert!(
+            !edit_mode_callback.contains(
+                "session.cancel_edit();\n                set_reader_models(&ui, document,"
+            )
+        );
+    }
+
+    #[test]
     fn editing_uses_measured_block_geometry_and_the_key_path_does_not_reset_models() {
         let ui_source = include_str!("../../../ui/readloom.slint");
         let rust_source = include_str!("main.rs");
@@ -3866,6 +5043,401 @@ mod tests {
             resolved.inspected_paragraphs,
             READER_WINDOW_SIZE
         );
+    }
+
+    #[test]
+    fn edit_transition_regression_keeps_the_highlighted_paragraph_as_the_edit_target() {
+        let block = |id: &str, text: &str| EditableBlock {
+            id: BlockId::new(id),
+            chapter_key: ChapterKey::new("txt:0"),
+            kind: ParagraphKind::Paragraph,
+            text: text.to_owned(),
+            editable: true,
+        };
+        let reading = [
+            block("first", "视口首段"),
+            block("active", "当前高亮段"),
+            block("after", "后文"),
+        ];
+        let draft = reading.clone();
+        let highlighted_index = 1;
+
+        let target =
+            remap_block_index_by_stable_id(&reading, &draft, highlighted_index, highlighted_index)
+                .expect("stable highlighted block");
+
+        assert_eq!(
+            target, highlighted_index,
+            "entering edit mode must start from the highlighted paragraph, not the first visible paragraph"
+        );
+        let source = include_str!("main.rs");
+        let edit_mode_callback = source
+            .split("ui.on_request_edit_mode")
+            .nth(1)
+            .expect("edit mode callback")
+            .split("ui.on_replace_block_text")
+            .next()
+            .expect("edit mode callback body");
+        assert!(
+            edit_mode_callback.contains("Some(&block_id)"),
+            "the measured edit anchor must explicitly prefer the highlighted block"
+        );
+    }
+
+    #[test]
+    fn edit_transition_regression_materializes_only_the_txt_presentation_window() {
+        let content = (0..1_000)
+            .map(|index| format!("这是编辑窗口化回归测试的第 {index} 段。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = Arc::new(ReaderDocument::from_text("编辑窗口化测试", content));
+        let draft = readloom_core::TxtDraft::from_document(&document);
+        let target = draft.blocks().len() / 2;
+        let anchor_block = draft.blocks()[target].clone();
+        let edit = Rc::new(RefCell::new(EditSession::new(
+            "txt-edit-window-test".to_owned(),
+            DocumentDraft::Txt(draft),
+            ViewAnchor {
+                chapter_key: anchor_block.chapter_key,
+                block_id: anchor_block.id,
+                character_offset_utf16: 0,
+                pixel_offset_from_viewport_top: 24.0,
+            },
+        )));
+        let range = reader_window_range(edit.borrow().draft().blocks().len(), target, None);
+
+        let model = ReaderParagraphModel::new_with_edit(
+            OpenDocument::Txt(document),
+            range.clone(),
+            Some(edit),
+        );
+
+        assert_eq!(
+            model.presented_paragraphs.len(),
+            range.len(),
+            "entering or structurally editing a long TXT must not rebuild every paragraph"
+        );
+    }
+
+    #[test]
+    fn txt_newlines_edit_raw_text_and_become_indented_reading_paragraphs() {
+        let document = Arc::new(ReaderDocument::from_text("缩进测试", "第一段".to_owned()));
+        let draft = readloom_core::TxtDraft::from_document(&document);
+        let first = draft.blocks()[0].clone();
+        let mut edit = EditSession::new(
+            "txt-indent-test".to_owned(),
+            DocumentDraft::Txt(draft),
+            ViewAnchor {
+                chapter_key: first.chapter_key,
+                block_id: first.id.clone(),
+                character_offset_utf16: 3,
+                pixel_offset_from_viewport_top: 0.0,
+            },
+        );
+
+        edit.apply(EditCommand::ReplaceText {
+            block_id: first.id,
+            text: "第一段\n第二段".to_owned(),
+            caret_utf16: 7,
+        })
+        .expect("split TXT paragraph");
+
+        assert_eq!(edit.draft().blocks().len(), 2);
+        assert!(
+            edit.draft()
+                .blocks()
+                .iter()
+                .all(|block| block.kind == ParagraphKind::Paragraph),
+            "each Enter-created TXT block must return to reading mode as an indented paragraph"
+        );
+        let source = include_str!("../../../ui/readloom.slint");
+        assert!(source.contains("root.settings-indent-prefix + paragraph.text"));
+        assert!(source.contains("text <=> row.live-edit-text"));
+        assert!(!source.contains("text <=> root.settings-indent-prefix + row.live-edit-text"));
+    }
+
+    #[test]
+    fn structural_edit_anchor_regression_ignores_transient_layout_callbacks() {
+        let rust_source = include_str!("main.rs");
+        let ui_source = include_str!("../../../ui/readloom.slint");
+        let viewport_callback = rust_source
+            .split("ui.on_reader_viewport_changed")
+            .nth(1)
+            .expect("viewport callback")
+            .split("ui.on_open_epub_location")
+            .next()
+            .expect("viewport callback body");
+        let structural_refresh = rust_source
+            .split("fn refresh_after_structural_edit(")
+            .nth(1)
+            .expect("structural refresh")
+            .split("fn apply_edit_history_step(")
+            .next()
+            .expect("structural refresh body");
+        let anchor_restore = rust_source
+            .split("fn schedule_view_anchor_restore(")
+            .nth(1)
+            .expect("anchor restore")
+            .split("fn schedule_geometry_measurement(")
+            .next()
+            .expect("anchor restore body");
+
+        assert!(ui_source.contains("view-anchor-restore-pending"));
+        assert!(viewport_callback.contains("ui.get_view_anchor_restore_pending()"));
+        assert!(viewport_callback.contains("let editing = ui.get_edit_mode();"));
+        assert!(viewport_callback.matches("if !editing").count() >= 2);
+        assert!(structural_refresh.contains("ui.set_view_anchor_restore_pending(true);"));
+        assert!(
+            structural_refresh.contains("restore_view_anchor_after_layout_with_viewport"),
+            "structural edits need independent focus and viewport anchors"
+        );
+        assert!(anchor_restore.contains("anchor: ViewAnchor"));
+        assert!(
+            ui_source
+                .matches("if !root.view-anchor-restore-pending")
+                .count()
+                >= 3,
+            "all inline cursor callbacks must ignore editor remount noise"
+        );
+    }
+
+    #[test]
+    fn txt_structural_edit_presents_new_draft_blocks_without_out_of_bounds() {
+        let content = (0..30)
+            .map(|index| format!("这是结构刷新回归测试的第 {index} 段。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = Arc::new(ReaderDocument::from_text("结构刷新测试", content));
+        let draft = readloom_core::TxtDraft::from_document(&document);
+        let target = draft
+            .blocks()
+            .iter()
+            .rev()
+            .find(|block| block.kind == ParagraphKind::Paragraph)
+            .expect("last editable paragraph")
+            .clone();
+        let mut edit = EditSession::new(
+            "txt-structure-test".to_owned(),
+            DocumentDraft::Txt(draft),
+            ViewAnchor {
+                chapter_key: target.chapter_key.clone(),
+                block_id: target.id.clone(),
+                character_offset_utf16: target.text.encode_utf16().count(),
+                pixel_offset_from_viewport_top: 0.0,
+            },
+        );
+        edit.apply(EditCommand::ReplaceText {
+            block_id: target.id,
+            text: format!("{}\n", target.text),
+            caret_utf16: target.text.encode_utf16().count() + 1,
+        })
+        .expect("split the last paragraph");
+        let focus_block_id = edit.anchor().block_id.clone();
+        let edit = Rc::new(RefCell::new(edit));
+        let paragraph_count = edit.borrow().draft().blocks().len();
+        let range = reader_window_range(paragraph_count, paragraph_count - 1, None);
+
+        let model = ReaderParagraphModel::new_with_edit(
+            OpenDocument::Txt(document),
+            range.clone(),
+            Some(edit),
+        );
+
+        assert_eq!(model.window_paragraphs().len(), range.len());
+        assert_eq!(
+            model
+                .window_paragraphs()
+                .last()
+                .map(|block| &block.block_id),
+            Some(&focus_block_id)
+        );
+    }
+
+    #[test]
+    fn paragraph_editor_window_boundary_split_and_merge_remain_scrollable() {
+        let content = (0..160)
+            .map(|index| format!("这是 96 块窗口边界测试的第 {index} 段。"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = Arc::new(ReaderDocument::from_text("窗口边界测试", content));
+        let draft = readloom_core::TxtDraft::from_document(&document);
+        let target_index = READER_WINDOW_SIZE * 2 - 2;
+        let target = draft.blocks()[target_index].clone();
+        assert_eq!(target.kind, ParagraphKind::Paragraph);
+        let mut edit = EditSession::new(
+            "txt-window-boundary-test".to_owned(),
+            DocumentDraft::Txt(draft),
+            ViewAnchor {
+                chapter_key: target.chapter_key.clone(),
+                block_id: target.id.clone(),
+                character_offset_utf16: target.text.encode_utf16().count(),
+                pixel_offset_from_viewport_top: -12.0,
+            },
+        );
+        edit.apply(EditCommand::ReplaceText {
+            block_id: target.id,
+            text: format!("{}\n边界右段", target.text),
+            caret_utf16: target.text.encode_utf16().count() + 5,
+        })
+        .expect("split near the presentation boundary");
+        let split_focus = edit.anchor().block_id.clone();
+        let split_count = edit.draft().blocks().len();
+        let split_range =
+            reader_window_range(split_count, target_index + 1, Some(READER_WINDOW_SIZE));
+        let split_edit = Rc::new(RefCell::new(edit));
+        let split_model = ReaderParagraphModel::new_with_edit(
+            OpenDocument::Txt(document.clone()),
+            split_range.clone(),
+            Some(split_edit.clone()),
+        );
+
+        assert!(split_range.contains(&(target_index + 1)));
+        assert!(
+            split_model
+                .window_paragraphs()
+                .iter()
+                .any(|block| block.block_id == split_focus)
+        );
+        assert!(
+            reader_window_shift_start(
+                split_range.clone(),
+                split_count,
+                split_range.start + READER_WINDOW_SIZE / 8,
+                false,
+            )
+            .is_some()
+        );
+        assert!(
+            reader_window_shift_start(
+                split_range.clone(),
+                split_count,
+                split_range.end - READER_WINDOW_SIZE / 8,
+                true,
+            )
+            .is_some()
+        );
+
+        split_edit
+            .borrow_mut()
+            .apply(EditCommand::JoinAdjacentText {
+                block_id: split_focus,
+                direction: JoinDirection::Previous,
+            })
+            .expect("merge the split boundary");
+        let merged_count = split_edit.borrow().draft().blocks().len();
+        let merged_range = reader_window_range(merged_count, target_index, Some(split_range.start));
+        let merged_model = ReaderParagraphModel::new_with_edit(
+            OpenDocument::Txt(document),
+            merged_range.clone(),
+            Some(split_edit),
+        );
+
+        assert_eq!(merged_model.window_paragraphs().len(), merged_range.len());
+        assert!(merged_range.contains(&target_index));
+    }
+
+    #[test]
+    fn reader_window_keeps_context_above_a_restored_location() {
+        let target = READER_WINDOW_SIZE * 2;
+
+        let range = reader_window_range(READER_WINDOW_SIZE * 4, target, None);
+
+        assert!(
+            range.start < target,
+            "restoring a reading location must leave earlier chapter content scrollable"
+        );
+        assert!(
+            range.end > target,
+            "restoring a reading location must leave later chapter content scrollable"
+        );
+        assert!(range.contains(&target));
+    }
+
+    #[test]
+    fn reader_window_rebuild_reuses_the_visible_start() {
+        let preferred_start = READER_WINDOW_SIZE;
+        let target = preferred_start + READER_WINDOW_SIZE / 2;
+
+        let range = reader_window_range(READER_WINDOW_SIZE * 4, target, Some(preferred_start));
+
+        assert_eq!(range.start, preferred_start);
+        assert!(range.contains(&target));
+    }
+
+    #[test]
+    fn reader_window_rolls_forward_with_overlap_before_the_visible_end() {
+        let range = READER_WINDOW_SIZE..READER_WINDOW_SIZE * 2;
+        let visible_index = range.end - READER_WINDOW_SIZE / 8;
+
+        let shifted_start =
+            reader_window_shift_start(range.clone(), READER_WINDOW_SIZE * 4, visible_index, true)
+                .expect("the next reader window should be loaded before reaching the hard edge");
+        let shifted =
+            reader_window_range(READER_WINDOW_SIZE * 4, visible_index, Some(shifted_start));
+
+        assert!(shifted.start > range.start);
+        assert!(shifted.start < range.end, "adjacent windows must overlap");
+        assert!(shifted.contains(&visible_index));
+    }
+
+    #[test]
+    fn reader_window_rolls_backward_with_overlap_near_the_visible_start() {
+        let range = READER_WINDOW_SIZE..READER_WINDOW_SIZE * 2;
+        let visible_index = range.start + READER_WINDOW_SIZE / 8;
+
+        let shifted_start =
+            reader_window_shift_start(range.clone(), READER_WINDOW_SIZE * 4, visible_index, false)
+                .expect("the previous reader window should load while scrolling upward");
+        let shifted =
+            reader_window_range(READER_WINDOW_SIZE * 4, visible_index, Some(shifted_start));
+
+        assert!(shifted.start < range.start);
+        assert!(shifted.end > range.start, "adjacent windows must overlap");
+        assert!(shifted.contains(&visible_index));
+    }
+
+    #[test]
+    fn structural_edits_remap_the_window_start_by_stable_block_id() {
+        let first_visible = BlockId::new("visible-first");
+        let updated = [
+            BlockId::new("inserted-before-window"),
+            BlockId::new("earlier"),
+            first_visible.clone(),
+            BlockId::new("later"),
+        ];
+
+        let remapped = remap_block_index(Some(&first_visible), updated.iter(), 1);
+
+        assert_eq!(remapped, 2);
+    }
+
+    #[test]
+    fn epub_edit_mode_maps_reading_blocks_to_the_matching_draft_content() {
+        let signature = |text: &str| BlockSignature {
+            kind: ParagraphKind::Paragraph,
+            text: text.to_owned(),
+        };
+        let reading = [signature("前文"), signature("当前段"), signature("后文")];
+        let draft = [
+            signature("解析器额外保留的节点"),
+            signature("前文"),
+            signature("当前段"),
+            signature("后文"),
+        ];
+
+        assert_eq!(remap_block_index_by_content(&reading, &draft, 1, 1), 2);
+    }
+
+    #[test]
+    fn cancel_edit_maps_a_changed_block_through_its_nearest_neighbor() {
+        let signature = |text: &str| BlockSignature {
+            kind: ParagraphKind::Paragraph,
+            text: text.to_owned(),
+        };
+        let draft = [signature("前文"), signature("已修改"), signature("后文")];
+        let reading = [signature("前文"), signature("原文"), signature("后文")];
+
+        assert_eq!(remap_block_index_by_content(&draft, &reading, 1, 1), 1);
     }
 
     #[test]
@@ -3987,6 +5559,87 @@ mod tests {
             model.row_data(0).expect("decoded image row").has_image,
             "the model must expose the cached image after the background result is drained"
         );
+    }
+
+    #[test]
+    fn inserted_epub_images_join_the_existing_windowed_reader_model() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([24, 48, 72, 255]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode test image");
+        let bytes: Arc<[u8]> = encoded.into_inner().into();
+        let epub_path = directory.path().join("editable-image.epub");
+        write_image_epub(&epub_path, &bytes);
+        let core = ReadloomCore::open(&directory.path().join("state.sqlite3")).expect("open core");
+        let document = Arc::new(core.open_epub(&epub_path).expect("open image EPUB"));
+        let draft = readloom_core::EpubDraft::from_document(&document).expect("create draft");
+        let anchor = draft
+            .blocks()
+            .iter()
+            .find(|block| block.text == "图片前正文。")
+            .expect("paragraph anchor")
+            .clone();
+        let original_image_id = draft
+            .blocks()
+            .iter()
+            .find(|block| block.kind == ParagraphKind::Image)
+            .expect("original image")
+            .id
+            .clone();
+        let mut edit = EditSession::new(
+            document.fingerprint().to_owned(),
+            DocumentDraft::Epub(draft),
+            ViewAnchor {
+                chapter_key: anchor.chapter_key.clone(),
+                block_id: anchor.id.clone(),
+                character_offset_utf16: 0,
+                pixel_offset_from_viewport_top: -8.0,
+            },
+        );
+        let change = edit
+            .apply(EditCommand::InsertEpubImage {
+                anchor_block_id: anchor.id.clone(),
+                side: InsertSide::After,
+                asset: readloom_core::ValidatedImageAsset {
+                    bytes,
+                    media_type: readloom_core::ImageMediaType::Png,
+                    width: 2,
+                    height: 2,
+                    digest: "1234567890abcdef".to_owned(),
+                },
+                alt_text: "新插图".to_owned(),
+            })
+            .expect("insert image");
+        let inserted_id = change.affected_block_id().clone();
+        let edit = Rc::new(RefCell::new(edit));
+        let count = edit.borrow().draft().blocks().len();
+
+        let model =
+            ReaderParagraphModel::new_with_edit(OpenDocument::Epub(document), 0..count, Some(edit));
+
+        assert_eq!(model.window_paragraphs()[2].block_id, inserted_id);
+        assert_eq!(model.window_paragraphs()[2].kind, ParagraphKind::Image);
+        assert_eq!(model.window_paragraphs()[2].text, "新插图");
+        assert_eq!(model.window_paragraphs()[3].block_id, original_image_id);
+        let item = model.row_data(2).expect("inserted image row");
+        assert_eq!(item.block_id.as_str(), inserted_id.as_str());
+        assert_eq!(item.kind.as_str(), "image");
+    }
+
+    #[test]
+    fn epub_image_controls_live_in_the_existing_inline_editor_canvas() {
+        let source = include_str!("../../../ui/readloom.slint");
+
+        assert!(source.contains("callback insert-epub-image();"));
+        assert!(source.contains("callback remove-epub-image(string);"));
+        assert!(source.contains("callback set-epub-image-alt(string, string);"));
+        assert!(source.contains("accessible-id: \"image-alt-editor-\" + paragraph.block-id"));
+        assert!(!source.contains("image-editor-window"));
     }
 
     fn write_image_epub(path: &Path, image_bytes: &[u8]) {
