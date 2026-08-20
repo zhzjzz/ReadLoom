@@ -55,6 +55,13 @@ enum OpenDocument {
 }
 
 impl OpenDocument {
+    fn identity(&self) -> usize {
+        match self {
+            Self::Txt(document) => Arc::as_ptr(document) as usize,
+            Self::Epub(document) => Arc::as_ptr(document) as usize,
+        }
+    }
+
     fn path(&self) -> Option<&Path> {
         match self {
             Self::Txt(document) => document.path(),
@@ -212,6 +219,74 @@ struct ViewportParagraphMatch {
     index: usize,
     chapter_index: usize,
     inspected_paragraphs: usize,
+}
+
+#[derive(Debug, Default)]
+struct ReaderScrollHighlightTracker {
+    document_identity: Option<usize>,
+    first_visible_index: Option<usize>,
+}
+
+impl ReaderScrollHighlightTracker {
+    fn sync(&mut self, document_identity: usize, first_visible_index: usize) {
+        self.document_identity = Some(document_identity);
+        self.first_visible_index = Some(first_visible_index);
+    }
+
+    fn reset(&mut self) {
+        self.first_visible_index = None;
+    }
+
+    fn observe(
+        &mut self,
+        document_identity: usize,
+        current_highlight: usize,
+        first_visible_index: usize,
+        paragraph_count: usize,
+    ) -> (usize, Option<bool>) {
+        if self.document_identity != Some(document_identity) {
+            self.document_identity = Some(document_identity);
+            self.first_visible_index = Some(first_visible_index);
+            return (current_highlight, None);
+        }
+        let previous_first_visible = self.first_visible_index.replace(first_visible_index);
+        let Some(previous_first_visible) = previous_first_visible else {
+            return (current_highlight, None);
+        };
+        let moving_forward = match first_visible_index.cmp(&previous_first_visible) {
+            std::cmp::Ordering::Greater => Some(true),
+            std::cmp::Ordering::Less => Some(false),
+            std::cmp::Ordering::Equal => None,
+        };
+        (
+            scroll_highlight_target(
+                current_highlight,
+                previous_first_visible,
+                first_visible_index,
+                paragraph_count,
+            ),
+            moving_forward,
+        )
+    }
+}
+
+fn scroll_highlight_target(
+    current_highlight: usize,
+    previous_first_visible: usize,
+    first_visible_index: usize,
+    paragraph_count: usize,
+) -> usize {
+    if paragraph_count == 0 {
+        return 0;
+    }
+    let current_highlight = current_highlight.min(paragraph_count - 1);
+    if first_visible_index >= previous_first_visible {
+        current_highlight
+            .saturating_add(first_visible_index - previous_first_visible)
+            .min(paragraph_count - 1)
+    } else {
+        current_highlight.saturating_sub(previous_first_visible - first_visible_index)
+    }
 }
 
 fn resolve_viewport_paragraph(
@@ -561,6 +636,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_background_image_request = Rc::new(Cell::new(1_u64));
     let active_epub_image_import_request = Rc::new(Cell::new(0_u64));
     let viewport_anchors = Rc::new(RefCell::new(ViewportAnchorController::default()));
+    let scroll_highlight_tracker = Rc::new(RefCell::new(ReaderScrollHighlightTracker::default()));
     let document_load_timer = Timer::default();
     apply_settings(&ui, &settings.borrow());
     {
@@ -647,6 +723,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(paragraph) = paragraphs.get(index.max(0) as usize) else {
                 return;
             };
+            session.touch_block(&paragraph.block_id);
             session.set_anchor(ViewAnchor {
                 chapter_key: ChapterKey::new(format!(
                     "{}:{}",
@@ -665,11 +742,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let workspace = workspace.clone();
         let viewport_anchors = viewport_anchors.clone();
+        let scroll_highlight_tracker = scroll_highlight_tracker.clone();
         ui.on_reader_viewport_changed(move |viewport_y| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             if ui.get_view_anchor_restore_pending() {
+                scroll_highlight_tracker.borrow_mut().reset();
                 return;
             }
             let Some(session) = workspace.active_session() else {
@@ -699,43 +778,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let presented_range = paragraph_model.map(|model| model.range.clone());
             anchor.chapter_key =
                 ChapterKey::new(format!("{}:{}", document.kind(), resolved.chapter_index));
-            if !editing {
-                session.set_anchor(anchor.clone());
+            let paragraph_count = ui.get_document_paragraph_count().max(0) as usize;
+            let (highlight_index, moving_forward) = scroll_highlight_tracker.borrow_mut().observe(
+                document.identity(),
+                current_index,
+                resolved.index,
+                paragraph_count,
+            );
+            if !editing && highlight_index != current_index {
+                ui.set_active_paragraph_index(as_i32(highlight_index));
+                ui.invoke_reading_position_changed(as_i32(highlight_index));
             }
-            if resolved.index != current_index {
-                let moving_forward = resolved.index > current_index;
-                if !editing {
-                    ui.set_active_paragraph_index(as_i32(resolved.index));
-                    ui.invoke_reading_position_changed(as_i32(resolved.index));
-                }
-                if let Some(range) = presented_range
-                    && let Some(start) = reader_window_shift_start(
-                        range,
-                        ui.get_document_paragraph_count().max(0) as usize,
-                        resolved.index,
-                        moving_forward,
-                    )
-                {
-                    ui.set_view_anchor_restore_pending(true);
-                    viewport_anchors.borrow_mut().clear();
-                    set_reader_models_with_preferred_start(
-                        &ui,
-                        document,
-                        resolved.index,
-                        Some(start),
-                        session.edit_session(),
-                    );
-                    if editing {
-                        restore_view_anchor_after_layout_with_viewport(
-                            &ui,
-                            &session,
-                            &viewport_anchors,
-                            anchor,
-                        );
-                    } else {
-                        restore_view_anchor_after_layout(&ui, &session, &viewport_anchors);
-                    }
-                }
+            if let Some(moving_forward) = moving_forward
+                && let Some(range) = presented_range
+                && let Some(start) = reader_window_shift_start(
+                    range,
+                    paragraph_count,
+                    resolved.index,
+                    moving_forward,
+                )
+            {
+                ui.set_view_anchor_restore_pending(true);
+                viewport_anchors.borrow_mut().clear();
+                set_reader_models_with_preferred_start(
+                    &ui,
+                    document,
+                    resolved.index,
+                    Some(start),
+                    session.edit_session(),
+                );
+                restore_view_anchor_after_layout_with_viewport(
+                    &ui,
+                    &session,
+                    &viewport_anchors,
+                    anchor,
+                );
             }
         });
     }
@@ -1377,6 +1454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let core = core.clone();
         let workspace = workspace.clone();
         let viewport_anchors = viewport_anchors.clone();
+        let scroll_highlight_tracker = scroll_highlight_tracker.clone();
         let pending_position = Rc::new(RefCell::new(None::<(OpenDocument, usize)>));
         let save_timer = Rc::new(Timer::default());
         ui.on_reading_position_changed(move |index| {
@@ -1396,15 +1474,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && let Some(paragraph) =
                         paragraph_model.and_then(|model| model.presented_paragraph(index as usize))
                 {
+                    session.touch_block(&paragraph.block_id);
+                    let character_offset_utf16 = session
+                        .anchor()
+                        .map_or(0, |anchor| anchor.character_offset_utf16);
+                    let viewport_y = ui.get_reader_viewport_y();
+                    let first_visible_block = viewport_anchors
+                        .borrow()
+                        .capture(
+                            ChapterKey::new(document.kind()),
+                            None,
+                            character_offset_utf16,
+                            viewport_y,
+                        )
+                        .map(|anchor| anchor.block_id);
+                    if let Some(first_visible) = first_visible_block
+                        .as_ref()
+                        .and_then(|block_id| resolve_viewport_paragraph(paragraph_model, block_id))
+                    {
+                        scroll_highlight_tracker
+                            .borrow_mut()
+                            .sync(document.identity(), first_visible.index);
+                    }
                     let chapter_key =
                         ChapterKey::new(format!("{}:{}", document.kind(), paragraph.chapter_index));
                     if let Some(anchor) = viewport_anchors.borrow().capture(
                         chapter_key,
                         Some(&paragraph.block_id),
-                        session
-                            .anchor()
-                            .map_or(0, |anchor| anchor.character_offset_utf16),
-                        ui.get_reader_viewport_y(),
+                        character_offset_utf16,
+                        viewport_y,
                     ) {
                         session.set_anchor(anchor);
                     }
@@ -1676,6 +1774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 character_offset_utf16: caret_utf16,
                 pixel_offset_from_viewport_top: pixel_offset,
             };
+            session.touch_block(&anchor.block_id);
             session.set_anchor(anchor);
         });
     }
@@ -1794,6 +1893,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_edit_history_state(&ui, &session);
                 ui.set_status_text("内联编辑已启用；背景、图片和当前阅读画布保持挂载。".into());
             } else {
+                let recent_target = session.most_recent_surviving_paragraph_index(&document);
                 let (draft_anchor_index, draft_first_index) = session
                     .edit_session()
                     .map(|edit| {
@@ -1812,7 +1912,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (anchor_index, first_index)
                     })
                     .unwrap_or_default();
-                let (target, preferred_start) = session
+                let (mapped_target, preferred_start) = session
                     .edit_session()
                     .map(|edit| {
                         let edit = edit.borrow();
@@ -1852,6 +1952,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     })
                     .unwrap_or((active_index, ui.get_reader_window_start().max(0) as usize));
+                let target = recent_target.unwrap_or(mapped_target);
                 session.cancel_edit();
                 let document = session.presentation_document();
                 if let Some(paragraph) = document.paragraph_at(target) {
@@ -3025,6 +3126,9 @@ fn restore_view_anchor_after_layout(
     controller: &Rc<RefCell<ViewportAnchorController>>,
 ) {
     let Some(viewport_anchor) = session.anchor() else {
+        ui.set_view_anchor_restore_generation(
+            ui.get_view_anchor_restore_generation().wrapping_add(1),
+        );
         ui.set_view_anchor_restore_pending(false);
         return;
     };
@@ -3037,6 +3141,8 @@ fn restore_view_anchor_after_layout_with_viewport(
     controller: &Rc<RefCell<ViewportAnchorController>>,
     viewport_anchor: ViewAnchor,
 ) {
+    let generation = ui.get_view_anchor_restore_generation().wrapping_add(1);
+    ui.set_view_anchor_restore_generation(generation);
     let Some(anchor) = session.anchor() else {
         ui.set_view_anchor_restore_pending(false);
         return;
@@ -3049,6 +3155,7 @@ fn restore_view_anchor_after_layout_with_viewport(
         viewport_anchor,
         anchor,
         2,
+        generation,
     );
 }
 
@@ -3059,6 +3166,7 @@ fn schedule_view_anchor_restore(
     viewport_anchor: ViewAnchor,
     anchor: ViewAnchor,
     retries: u8,
+    generation: i32,
 ) {
     Timer::single_shot(Duration::from_millis(16), move || {
         let Some(ui) = weak.upgrade() else {
@@ -3074,9 +3182,10 @@ fn schedule_view_anchor_restore(
                     viewport_anchor,
                     anchor,
                     retries.saturating_sub(1),
+                    generation,
                 );
             } else {
-                ui.set_view_anchor_restore_pending(false);
+                finish_view_anchor_restore(ui.as_weak(), session, anchor, generation);
             }
             return;
         };
@@ -3096,6 +3205,27 @@ fn schedule_view_anchor_restore(
         ui.set_edit_caret_byte(as_i32(caret_byte));
         ui.set_edit_anchor_pixel_offset(anchor.pixel_offset_from_viewport_top);
         ui.set_edit_restore_generation(ui.get_edit_restore_generation().wrapping_add(1));
+        if let Some(index) = presented_block_index(&ui, &anchor.block_id) {
+            ui.set_active_paragraph_index(as_i32(index));
+        }
+        finish_view_anchor_restore(ui.as_weak(), session, anchor, generation);
+    });
+}
+
+fn finish_view_anchor_restore(
+    weak: slint::Weak<MainWindow>,
+    session: Rc<document_workspace::DocumentSession>,
+    anchor: ViewAnchor,
+    generation: i32,
+) {
+    Timer::single_shot(Duration::from_millis(16), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_view_anchor_restore_generation() != generation {
+            return;
+        }
+        session.set_anchor(anchor.clone());
         if let Some(index) = presented_block_index(&ui, &anchor.block_id) {
             ui.set_active_paragraph_index(as_i32(index));
         }
@@ -3338,6 +3468,7 @@ fn set_session_anchor_to_block(
     let Some(block) = edit.borrow().draft().block(block_id).cloned() else {
         return;
     };
+    session.touch_block(block_id);
     let pixel_offset = session
         .anchor()
         .map_or(0.0, |anchor| anchor.pixel_offset_from_viewport_top);
@@ -5046,6 +5177,27 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_moves_the_highlight_relative_to_its_current_paragraph() {
+        assert_eq!(scroll_highlight_target(57, 47, 48, 100), 58);
+        assert_eq!(scroll_highlight_target(57, 47, 50, 100), 60);
+        assert_eq!(scroll_highlight_target(57, 50, 48, 100), 55);
+        assert_eq!(scroll_highlight_target(57, 48, 48, 100), 57);
+        assert_eq!(scroll_highlight_target(0, 8, 3, 100), 0);
+        assert_eq!(scroll_highlight_target(99, 3, 8, 100), 99);
+    }
+
+    #[test]
+    fn programmatic_viewport_restores_reset_the_scroll_highlight_baseline() {
+        let mut tracker = ReaderScrollHighlightTracker::default();
+
+        tracker.sync(1, 47);
+        assert_eq!(tracker.observe(1, 57, 48, 100), (58, Some(true)));
+        tracker.reset();
+        assert_eq!(tracker.observe(1, 58, 32, 100), (58, None));
+        assert_eq!(tracker.observe(2, 21, 6, 100), (21, None));
+    }
+
+    #[test]
     fn edit_transition_regression_keeps_the_highlighted_paragraph_as_the_edit_target() {
         let block = |id: &str, text: &str| EditableBlock {
             id: BlockId::new(id),
@@ -5184,14 +5336,19 @@ mod tests {
 
         assert!(ui_source.contains("view-anchor-restore-pending"));
         assert!(viewport_callback.contains("ui.get_view_anchor_restore_pending()"));
+        assert!(viewport_callback.contains("scroll_highlight_tracker.borrow_mut().reset()"));
         assert!(viewport_callback.contains("let editing = ui.get_edit_mode();"));
-        assert!(viewport_callback.matches("if !editing").count() >= 2);
+        assert!(viewport_callback.contains("if !editing && highlight_index != current_index"));
+        assert!(!viewport_callback.contains("session.set_anchor(anchor.clone())"));
         assert!(structural_refresh.contains("ui.set_view_anchor_restore_pending(true);"));
         assert!(
             structural_refresh.contains("restore_view_anchor_after_layout_with_viewport"),
             "structural edits need independent focus and viewport anchors"
         );
         assert!(anchor_restore.contains("anchor: ViewAnchor"));
+        assert!(ui_source.contains("view-anchor-restore-generation"));
+        assert!(anchor_restore.contains("finish_view_anchor_restore"));
+        assert!(rust_source.contains("fn finish_view_anchor_restore("));
         assert!(
             ui_source
                 .matches("if !root.view-anchor-restore-pending")

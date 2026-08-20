@@ -1254,6 +1254,7 @@ export component MainWindow inherits Window {
     in-out property <int> edit-restore-generation: 0;
     in-out property <float> edit-anchor-pixel-offset: 0;
     in-out property <bool> view-anchor-restore-pending: false;
+    in-out property <int> view-anchor-restore-generation: 0;
     in-out property <int> geometry-measure-generation: 0;
     in-out property <string> document-encoding: "UTF-8";
     in-out property <string> document-line-ending: "LF";
@@ -2081,7 +2082,11 @@ export component MainWindow inherits Window {
                             spacing: DesignTokens.space-3;
                             Text { text: "尚未打开书籍"; color: DesignTokens.text-primary; font-size: DesignTokens.type-page-title; font-weight: DesignTokens.weight-page-title; horizontal-alignment: center; }
                             Text { text: "前往书库选择 TXT 或 EPUB，已打开的书籍会保留为标签。"; color: DesignTokens.text-muted; font-size: DesignTokens.type-item-title; horizontal-alignment: center; }
-                            ActionButton { width: 120px; height: 38px; text: "请打开书籍"; primary: true; clicked => { root.back-to-library(); } }
+                            HorizontalLayout {
+                                height: 38px;
+                                alignment: center;
+                                ActionButton { width: 120px; height: 38px; text: "请打开书籍"; primary: true; clicked => { root.back-to-library(); } }
+                            }
                         }
                     }
 
