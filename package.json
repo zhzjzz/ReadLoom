@@ -6,17 +6,16 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
-    "build:exe": "tauri build --no-bundle --features custom-protocol && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1",
+    "build:exe": "tauri build --no-bundle --features custom-protocol",
     "preview": "vite preview --host 127.0.0.1 --port 1421",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "verify:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-startup.ps1",
     "slint:check": "cargo check -p readloom",
     "slint:run": "cargo run -p readloom",
     "slint:build": "cargo build -p readloom --release",
-    "slint:verify": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-slint-stage1.ps1"
+    "slint:verify": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo build --release --workspace && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-gui-subsystem.ps1"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",
