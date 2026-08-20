@@ -1,0 +1,27 @@
+name: 功能建议
+description: 提出新的功能或体验改进建议
+title: "[Feature] "
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: 使用需求
+      description: 请说明你遇到的使用场景或当前不便之处。
+      placeholder: 在什么情况下需要这个功能？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 请描述希望 Readloom 如何解决这个问题。
+      placeholder: 说明期望的功能和交互方式。
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 可附上示意图、参考软件或其他说明。

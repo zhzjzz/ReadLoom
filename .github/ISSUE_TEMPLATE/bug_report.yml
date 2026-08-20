@@ -1,0 +1,53 @@
+name: Bug 报告
+description: 报告可复现的功能异常或界面问题
+title: "[Bug] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 请说明发生了什么，并尽量附上截图或录屏。
+      placeholder: 简要描述实际出现的问题。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: 说明你认为正确的结果应该是什么。
+    validations:
+      required: true
+
+  - type: input
+    id: readloom-version
+    attributes:
+      label: Readloom 版本
+      placeholder: 例如 v0.1.0-beta.1
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      placeholder: 例如 Windows 11 24H2 x64
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 可粘贴日志，或拖入相关文件。
